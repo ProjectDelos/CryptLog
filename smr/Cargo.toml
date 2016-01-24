@@ -1,0 +1,7 @@
+[package]
+name = "smr"
+version = "0.1.0"
+authors = ["Iulia Tamas <iulia.tamas@yale.edu>"]
+
+[dependencies]
+rustc-serialize = "0.3"
