@@ -1,45 +1,67 @@
 extern crate rustc_serialize;
 
-use std::marker::PhantomData;
 //use self::rustc_serialize::json;
-use self::rustc_serialize::{Encodable, Decodable};
 
-use indexed_queue::IndexedQueue;
+use std::collections::{HashMap};
+use indexed_queue::{IndexedQueue, Entry};
 
-// templated with DS type and object types
-pub struct Runtime<Q, T>
-    where Q: Encodable + Decodable,
-          T: IndexedQueue<Q> {
+pub type ObjId = i32;
+pub type Callback = FnMut(Entry);
+use indexed_queue::LogIndex;
+
+pub struct Runtime<T>
+    where T: IndexedQueue {
     iq: T,
-    pd: PhantomData<Q>,
 
-    // map from obj_id to callbacks
-
-    // map from obj_id to last updated index
+    callbacks: HashMap<ObjId, Vec<Box<Callback>>>,  
+    pub index: HashMap<ObjId, LogIndex>,
 }
 
-impl<Q, T> Runtime<Q, T>
-    where Q: Encodable + Decodable,
-          T: IndexedQueue<Q> {
-    pub fn append(&mut self, entry: Q) {
+impl<T> Runtime<T>
+    where T: IndexedQueue {
+
+    pub fn append(&mut self, entry: Entry) {
        self.iq.append(entry);
     }
 
-    fn sync(obj_id: i32) {
-        // stream from indexed queue
+    pub fn sync(&mut self, obj_id: ObjId) {
+        let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
+        let rx = self.iq.stream_from(self.index[&obj_id]);
+        loop {
+            match rx.recv() {
+                Ok(e) => {
+                    let mut idx = self.index.get_mut(&obj_id).unwrap();
+                    *idx = e.idx.unwrap();
+                    for c in callbacks.iter_mut() {
+                        c(e);
+                    }
+                }
+                Err(_) => break
+             };
+        }
+    }
 
-        // send entries through data structures callbacks
+    pub fn register_object(&mut self, obj_id: ObjId, c: Box<Callback>) {
+        if !self.callbacks.contains_key(&obj_id) {
+            self.callbacks.insert(obj_id, Vec::new());
+        }
+        self.callbacks.get_mut(&obj_id).unwrap().push(c);
+
+        if !self.index.contains_key(&obj_id) {
+            self.index.insert(obj_id, 0);
+        }
     }
 
 }
 
-impl<Q, T> Runtime<Q, T>
-    where Q: Encodable + Decodable,
-          T: IndexedQueue<Q>{
-    pub fn new(iq: T) -> Runtime<Q, T> {
+impl<T> Runtime<T>
+    where T: IndexedQueue {
+
+    pub fn new(iq: T) -> Runtime<T> {
         return Runtime {
             iq: iq,
-            pd: PhantomData,
+            callbacks: HashMap::new(),
+            index: HashMap::new(),
         }
      }
 }
@@ -48,29 +70,11 @@ impl<Q, T> Runtime<Q, T>
 mod test {
     use super::Runtime;
     use indexed_queue::InMemoryQueue;
-
-    #[derive(RustcDecodable, RustcEncodable, Debug, Copy, Clone)]
-    pub struct IntEntry {
-        data: usize,
-    }
-
-    impl IntEntry {
-        pub fn new(data: usize) -> IntEntry {
-            return IntEntry {
-                data: data,
-            }
-        }
-
-        pub fn data(&self) -> usize {
-            return self.data;
-        }
-    }
+    use indexed_queue::Entry;
 
     #[test]
     fn create_runtime() {
-        let mut r: Runtime<IntEntry, InMemoryQueue<IntEntry>> =
-            Runtime::new(
-            InMemoryQueue::new());
-        r.append(IntEntry::new(10));
+        let mut r: Runtime<InMemoryQueue> = Runtime::new(InMemoryQueue::new());
+        r.append(Entry::new(10));
     }
 }
