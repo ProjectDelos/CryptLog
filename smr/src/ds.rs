@@ -53,8 +53,8 @@ impl Register {
     // TODO: could just pass the operations back?
     fn callback(&mut self, e: Entry) {
         for op in &e.operations {
-            match op {
-                &State::Encoded(ref s) => {
+            match op.operator {
+                State::Encoded(ref s) => {
                     let op = json::decode(&s).unwrap();
                     match op {
                         RegisterOp::Write{data} => {

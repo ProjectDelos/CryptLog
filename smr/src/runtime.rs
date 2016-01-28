@@ -3,7 +3,7 @@ extern crate rustc_serialize;
 //use self::rustc_serialize::json;
 
 use std::collections::{HashMap};
-use indexed_queue::{IndexedQueue, Entry, ObjId, State};
+use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation};
 
 pub type Callback = FnMut(Entry);
 use indexed_queue::LogIndex;
@@ -32,8 +32,8 @@ impl<T> Runtime<T>
         } else {
             self.iq.append(Entry::new(
                 Vec::new(),
-                vec![State::Encoded(obj_id.to_string())],
-                vec![data]))
+                vec![obj_id],
+                vec![Operation::new(obj_id, data)]))
         }
     }
 

@@ -1,6 +1,7 @@
 extern crate rustc_serialize;
 
 use std::collections::VecDeque;
+use std::sync::{Mutex, Arc};
 
 //use self::rustc_serialize::json;
 use self::rustc_serialize::{Encodable, Decodable};
@@ -18,21 +19,27 @@ pub enum State {
 
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Operation {
-    obj_id: ObjId, // hard coded
-    operator: State,
+    pub obj_id: ObjId, // hard coded
+    pub operator: State,
+}
+
+impl Operation {
+    pub fn new(obj_id : ObjId, operator: State) -> Operation {
+        Operation{obj_id: obj_id, operator: operator}
+    }
 }
 
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
     pub idx: Option<LogIndex>,
-    read_set: Vec<State>,
-    write_set: Vec<State>,
-    pub operations: Vec<State>,
+    read_set: Vec<ObjId>,
+    write_set: Vec<ObjId>,
+    pub operations: Vec<Operation>,
 }
 
 impl Entry {
-    pub fn new(read_set: Vec<State>, write_set: Vec<State>,
-               operations: Vec<State>) -> Entry {
+    pub fn new(read_set: Vec<ObjId>, write_set: Vec<ObjId>,
+               operations: Vec<Operation>) -> Entry {
         return Entry {
             idx: None,
             read_set: read_set,
@@ -77,3 +84,49 @@ impl IndexedQueue for InMemoryQueue {
     }
 }
 
+#[derive(Clone)]
+pub struct SharedQueue {
+    q: Arc<Mutex<InMemoryQueue>>,
+}
+
+impl SharedQueue {
+    pub fn new() -> SharedQueue {
+        SharedQueue {
+            q: Arc::new(Mutex::new(InMemoryQueue::new())),
+        }
+    }
+}
+
+impl IndexedQueue for SharedQueue {
+    fn append(&mut self, e: Entry) {
+        self.q.lock().unwrap().append(e)
+    }
+    fn stream_from(&self, idx: LogIndex) -> mpsc::Receiver<Entry> {
+        self.q.lock().unwrap().stream_from(idx)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use super::State::{Encoded};
+    fn entry() -> Entry {
+        Entry::new(
+            vec![0,1,2],
+            vec![1,2],
+            vec![
+                Operation::new(0, Encoded("get(k0)".to_string())),
+                Operation::new(1, Encoded("get(k1)".to_string())),
+                Operation::new(2, Encoded("get(k2)".to_string())),
+                Operation::new(1, Encoded("put(k1, 0)".to_string())),
+                Operation::new(2, Encoded("put(k2, 1)".to_string())),
+            ])
+    }
+
+    #[test]
+    fn in_memory() {
+        let mut q = InMemoryQueue::new();
+        let e = entry();
+        q.append(e)
+    }
+}
