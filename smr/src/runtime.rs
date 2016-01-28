@@ -3,10 +3,11 @@ extern crate rustc_serialize;
 //use self::rustc_serialize::json;
 
 use std::collections::{HashMap};
-use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation};
+use indexed_queue::{IndexedQueue, Entry, ObjId, State,
+                    Operation, TxType, TxState, LogIndex};
 
 pub type Callback = FnMut(Entry);
-use indexed_queue::LogIndex;
+//use indexed_queue::LogIndex;
 
 pub struct Runtime<T>
     where T: IndexedQueue {
@@ -16,10 +17,11 @@ pub struct Runtime<T>
     pub index: HashMap<ObjId, LogIndex>,
 
     // Transaction semantics
-    read_set: Vec<State>,
-    write_set: Vec<State>,
-    operations: Vec<State>,
+    read_set: Vec<ObjId>,
+    write_set: Vec<ObjId>,
+    operations: Vec<Operation>,
     tx_mode: bool,
+    begin_tx_idx: Option<LogIndex>,
 }
 
 impl<T> Runtime<T>
@@ -27,25 +29,53 @@ impl<T> Runtime<T>
 
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
-            self.write_set.push(State::Encoded(obj_id.to_string()));
-            self.operations.push(data);
+            self.write_set.push(obj_id);
+            self.operations.push(Operation::new(obj_id, data));
         } else {
             self.iq.append(Entry::new(
                 Vec::new(),
                 vec![obj_id],
-                vec![Operation::new(obj_id, data)]))
+                vec![Operation::new(obj_id, data)],
+                TxType::None,
+                TxState::None));
         }
     }
 
-    // TODO: when TX Begins, log entry for TxBegin has an idx
-    // Sync all objects relevant to the transaction up to that idx
+    pub fn begin_tx(&mut self) {
+        self.tx_mode = true;
+        // dummy begintx entry
+        self.begin_tx_idx = Some(self.iq.append(Entry::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            TxType::Begin,
+            TxState::None)));
+
+    }
+
+    pub fn end_tx(&mut self) {
+        self.iq.append(Entry::new(
+            // TODO: move here?
+            self.read_set.clone(),
+            self.write_set.clone(),
+            self.operations.clone(),
+            TxType::End,
+            TxState::None));
+        self.tx_mode = false;
+    }
 
     pub fn sync(&mut self, obj_id: ObjId) {
-        // TODO: when TX added, acknowdledge read attempt
+        let mut rx;
+        if self.tx_mode {
+            self.read_set.push(obj_id);
+            rx = self.iq.stream_from_to(self.index[&obj_id],
+                                        self.begin_tx_idx);
+        } else {
+            rx = self.iq.stream_from_to(self.index[&obj_id], None);
+        }
 
         // send updates to relevant callbacks
         let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
-        let rx = self.iq.stream_from(self.index[&obj_id]);
         loop {
             match rx.recv() {
                 Ok(e) => {
@@ -85,6 +115,7 @@ impl<T> Runtime<T>
             write_set: Vec::new(),
             operations: Vec::new(),
             tx_mode: false,
+            begin_tx_idx: None,
         }
      }
 }
