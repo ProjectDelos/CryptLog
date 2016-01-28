@@ -3,9 +3,8 @@ extern crate rustc_serialize;
 //use self::rustc_serialize::json;
 
 use std::collections::{HashMap};
-use indexed_queue::{IndexedQueue, Entry};
+use indexed_queue::{IndexedQueue, Entry, ObjId, State};
 
-pub type ObjId = i32;
 pub type Callback = FnMut(Entry);
 use indexed_queue::LogIndex;
 
@@ -15,16 +14,36 @@ pub struct Runtime<T>
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,  
     pub index: HashMap<ObjId, LogIndex>,
+
+    // Transaction semantics
+    read_set: Vec<State>,
+    write_set: Vec<State>,
+    operations: Vec<State>,
+    tx_mode: bool,
 }
 
 impl<T> Runtime<T>
     where T: IndexedQueue {
 
-    pub fn append(&mut self, entry: Entry) {
-       self.iq.append(entry);
+    pub fn append(&mut self, obj_id: ObjId, data: State) {
+        if self.tx_mode {
+            self.write_set.push(State::Encoded(obj_id.to_string()));
+            self.operations.push(data);
+        } else {
+            self.iq.append(Entry::new(
+                Vec::new(),
+                vec![State::Encoded(obj_id.to_string())],
+                vec![data]))
+        }
     }
 
+    // TODO: when TX Begins, log entry for TxBegin has an idx
+    // Sync all objects relevant to the transaction up to that idx
+
     pub fn sync(&mut self, obj_id: ObjId) {
+        // TODO: when TX added, acknowdledge read attempt
+
+        // send updates to relevant callbacks
         let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
         let rx = self.iq.stream_from(self.index[&obj_id]);
         loop {
@@ -33,7 +52,7 @@ impl<T> Runtime<T>
                     let mut idx = self.index.get_mut(&obj_id).unwrap();
                     *idx = e.idx.unwrap();
                     for c in callbacks.iter_mut() {
-                        c(e);
+                        c(e.clone());
                     }
                 }
                 Err(_) => break
@@ -62,6 +81,10 @@ impl<T> Runtime<T>
             iq: iq,
             callbacks: HashMap::new(),
             index: HashMap::new(),
+            read_set: Vec::new(),
+            write_set: Vec::new(),
+            operations: Vec::new(),
+            tx_mode: false,
         }
      }
 }
@@ -69,12 +92,11 @@ impl<T> Runtime<T>
 #[cfg(test)]
 mod test {
     use super::Runtime;
-    use indexed_queue::InMemoryQueue;
-    use indexed_queue::Entry;
+    use indexed_queue::{InMemoryQueue, State};
 
     #[test]
     fn create_runtime() {
         let mut r: Runtime<InMemoryQueue> = Runtime::new(InMemoryQueue::new());
-        r.append(Entry::new(10));
+        r.append(0, State::Encoded(String::from("Hello")));
     }
 }

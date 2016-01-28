@@ -8,23 +8,37 @@ use self::rustc_serialize::{Encodable, Decodable};
 use std::sync::mpsc;
 
 pub type LogIndex = usize;
+pub type ObjId = i32;
 
-#[derive(RustcDecodable, RustcEncodable, Debug, Copy, Clone)]
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
+pub enum State {
+    Encrypted(Vec<u8>),
+    Encoded(String),
+}
+
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
+pub struct Operation {
+    obj_id: ObjId, // hard coded
+    operator: State,
+}
+
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
-    data: i32,
     pub idx: Option<LogIndex>,
+    read_set: Vec<State>,
+    write_set: Vec<State>,
+    pub operations: Vec<State>,
 }
 
 impl Entry {
-    pub fn new(data: i32) -> Entry {
+    pub fn new(read_set: Vec<State>, write_set: Vec<State>,
+               operations: Vec<State>) -> Entry {
         return Entry {
-            data: data,
             idx: None,
+            read_set: read_set,
+            write_set: write_set,
+            operations: operations,
         }
-    }
-
-    pub fn data(&self) -> i32 {
-        return self.data;
     }
 }
 
@@ -57,7 +71,7 @@ impl IndexedQueue for InMemoryQueue {
         let (tx, rx) = mpsc::channel();
         // TODO: thread
         for i in idx..self.q.len() as LogIndex {
-            tx.send(self.q[i as usize]).unwrap();
+            tx.send(self.q[i as usize].clone()).unwrap();
         }
         return rx;
     }

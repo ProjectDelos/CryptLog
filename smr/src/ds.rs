@@ -1,8 +1,11 @@
 // smr/ds.rs
 // State Machine Replicated Data Structures
 
-use runtime::Runtime;
-use indexed_queue::{Entry, InMemoryQueue,  IndexedQueue};
+extern crate rustc_serialize;
+use self::rustc_serialize::json;
+
+use runtime::{Runtime};
+use indexed_queue::{Entry, InMemoryQueue,  IndexedQueue, State};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -11,6 +14,11 @@ pub struct Register {
     obj_id: i32,
 
     data: Arc<Mutex<i32>>,
+}
+
+#[derive(RustcEncodable, RustcDecodable)]
+pub enum RegisterOp {
+    Write{data: i32},
 }
 
 impl Register {
@@ -37,13 +45,27 @@ impl Register {
     }
 
     fn write(&mut self, val: i32) {
-        self.runtime.lock().unwrap().append(Entry::new(val));
+        let mut runtime = self.runtime.lock().unwrap();
+        let op = RegisterOp::Write{data: val};
+        runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
     }
 
+    // TODO: could just pass the operations back?
     fn callback(&mut self, e: Entry) {
-        // TODO: pattern match on e
-        let mut data = self.data.lock().unwrap();
-        *data = e.data();
+        for op in &e.operations {
+            match op {
+                &State::Encoded(ref s) => {
+                    let op = json::decode(&s).unwrap();
+                    match op {
+                        RegisterOp::Write{data} => {
+                            let mut m_data = self.data.lock().unwrap();
+                            *m_data = data;
+                        }
+                    }
+                }
+                _ => {/* nothing */}
+            }
+        }
     }
 }
 
