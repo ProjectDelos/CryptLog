@@ -1,6 +1,6 @@
 extern crate rustc_serialize;
 
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use std::sync::{Mutex, Arc};
 
 // use self::rustc_serialize::json;
@@ -8,7 +8,7 @@ use self::rustc_serialize::Encodable;
 
 use std::sync::mpsc;
 
-pub type LogIndex = usize;
+pub type LogIndex = i64;
 pub type ObjId = i32;
 
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
@@ -49,8 +49,8 @@ pub enum TxState {
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
     pub idx: Option<LogIndex>,
-    read_set: Vec<ObjId>,
-    write_set: Vec<ObjId>,
+    read_set: HashSet<ObjId>,
+    write_set: HashSet<ObjId>,
     pub operations: Vec<Operation>,
 
     tx_type: TxType,
@@ -58,9 +58,12 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn new(read_set: Vec<ObjId>, write_set: Vec<ObjId>,
+    pub fn new(read_set: HashSet<ObjId>,
+               write_set: HashSet<ObjId>,
                operations: Vec<Operation>,
-               tx_type: TxType, tx_state: TxState) -> Entry {
+               tx_type: TxType,
+               tx_state: TxState)
+               -> Entry {
         return Entry {
             idx: None,
             read_set: read_set,
@@ -68,16 +71,20 @@ impl Entry {
             operations: operations,
             tx_type: tx_type,
             tx_state: tx_state,
-        }
+        };
     }
 }
 
 pub trait IndexedQueue {
     fn append(&mut self, e: Entry) -> LogIndex;
-    fn stream_from_to(&self, from: LogIndex,
-                      to: Option<LogIndex>) -> mpsc::Receiver<Entry>;
+    fn stream(&self,
+              obj_ids: &HashSet<ObjId>,
+              from: LogIndex,
+              to: Option<LogIndex>)
+              -> mpsc::Receiver<Entry>;
 }
 
+#[derive(Clone)]
 pub struct InMemoryQueue {
     q: VecDeque<Entry>,
 }
@@ -89,25 +96,29 @@ impl InMemoryQueue {
 }
 
 impl IndexedQueue for InMemoryQueue {
-    fn append (&mut self, mut e: Entry) -> LogIndex {
-        e.idx = Some(self.q.len());
-        println!("InMemoryQueue::append {:?}", e);
+    fn append(&mut self, mut e: Entry) -> LogIndex {
+        e.idx = Some(self.q.len() as LogIndex);
+        // println!("InMemoryQueue::append {:?}", e);
         self.q.push_back(e);
-        return self.q.len();
+        return self.q.len() as LogIndex;
     }
 
-    fn stream_from_to(&self, from: LogIndex,
-                      to: Option<LogIndex>) -> mpsc::Receiver<Entry> {
-        // TODO: thread
-        println!("InMemoryQueue::stream_from_to from idx {}", from);
+    fn stream(&self,
+              obj_ids: &HashSet<ObjId>,
+              from: LogIndex,
+              to: Option<LogIndex>)
+              -> mpsc::Receiver<Entry> {
         let (tx, rx) = mpsc::channel();
         let to = match to {
             Some(idx) => idx,
-            None => self.q.len()
+            None => self.q.len() as LogIndex,
         };
 
         for i in from..to as LogIndex {
-            tx.send(self.q[i as usize].clone()).unwrap();
+            if !self.q[i as usize].write_set.is_disjoint(&obj_ids) {
+                // entry relevant to some obj_ids
+                tx.send(self.q[i as usize].clone()).unwrap();
+            }
         }
         return rx;
     }
@@ -128,9 +139,12 @@ impl IndexedQueue for SharedQueue {
     fn append(&mut self, e: Entry) -> LogIndex {
         self.q.lock().unwrap().append(e)
     }
-    fn stream_from_to(&self, from: LogIndex,
-                      to: Option<LogIndex>) -> mpsc::Receiver<Entry> {
-        self.q.lock().unwrap().stream_from_to(from, to)
+    fn stream(&self,
+              obj_ids: &HashSet<ObjId>,
+              from: LogIndex,
+              to: Option<LogIndex>)
+              -> mpsc::Receiver<Entry> {
+        self.q.lock().unwrap().stream(obj_ids, from, to)
     }
 }
 
@@ -140,17 +154,17 @@ mod test {
     use super::State::Encoded;
     use std::thread;
     fn entry() -> Entry {
-        Entry::new(vec![0, 1, 2],
-                   vec![1, 2],
+        Entry::new(vec![0, 1, 2].into_iter().collect(),
+                   vec![1, 2].into_iter().collect(),
                    vec![
                 Operation::new(0, Encoded("get(k0)".to_string())),
                 Operation::new(1, Encoded("get(k1)".to_string())),
                 Operation::new(2, Encoded("get(k2)".to_string())),
                 Operation::new(1, Encoded("put(k1, 0)".to_string())),
                 Operation::new(2, Encoded("put(k2, 1)".to_string())),
-            ],
-            TxType::None,
-            TxState::None)
+                   ],
+                   TxType::None,
+                   TxState::None)
     }
 
     #[test]
@@ -161,7 +175,7 @@ mod test {
             let e = entry();
             q.append(e);
         }
-        let rx = q.stream_from_to(0, None);
+        let rx = q.stream(&vec![0, 1, 2].into_iter().collect(), 0, None);
         let mut read = 0;
         let ent = entry();
         for e in rx {
@@ -194,7 +208,7 @@ mod test {
         child1.join().unwrap();
         child2.join().unwrap();
 
-        let rx = q3.stream_from_to(0, None);
+        let rx = q3.stream(&vec![0, 1, 2].into_iter().collect(), 0, None);
         let mut read = 0;
         for e in rx {
             assert_eq!(e.idx.unwrap(), read);

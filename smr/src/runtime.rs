@@ -1,123 +1,148 @@
 extern crate rustc_serialize;
 
-//use self::rustc_serialize::json;
+// use self::rustc_serialize::json;
 
-use std::collections::{HashMap};
-use indexed_queue::{IndexedQueue, Entry, ObjId, State,
-                    Operation, TxType, TxState, LogIndex};
+use std::collections::{HashMap, HashSet};
+use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex};
 
-pub type Callback = FnMut(Entry);
-//use indexed_queue::LogIndex;
+pub type Callback = FnMut(Operation);
+// use indexed_queue::LogIndex;
 
 pub struct Runtime<T>
-    where T: IndexedQueue {
+    where T: IndexedQueue
+{
     iq: T,
 
-    callbacks: HashMap<ObjId, Vec<Box<Callback>>>,  
-    pub index: HashMap<ObjId, LogIndex>,
+    callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
+    // pub index: HashMap<ObjId, LogIndex>,
+    pub global_idx: LogIndex,
+    obj_ids: HashSet<ObjId>,
 
     // Transaction semantics
-    read_set: Vec<ObjId>,
-    write_set: Vec<ObjId>,
+    read_set: HashSet<ObjId>,
+    write_set: HashSet<ObjId>,
     operations: Vec<Operation>,
-    tx_mode: bool,
-    begin_tx_idx: Option<LogIndex>,
+    tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
 }
 
-impl<T> Runtime<T>
-    where T: IndexedQueue {
-
+impl<T> Runtime<T> where T: IndexedQueue
+{
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
-            self.write_set.push(obj_id);
+            self.write_set.insert(obj_id);
             self.operations.push(Operation::new(obj_id, data));
         } else {
-            self.iq.append(Entry::new(
-                Vec::new(),
-                vec![obj_id],
-                vec![Operation::new(obj_id, data)],
-                TxType::None,
-                TxState::None));
+            self.iq.append(Entry::new(HashSet::new(),
+                                      vec![obj_id].into_iter().collect(),
+                                      vec![Operation::new(obj_id, data)],
+                                      TxType::None,
+                                      TxState::None));
         }
     }
 
     pub fn begin_tx(&mut self) {
         self.tx_mode = true;
-        // dummy begintx entry
-        self.begin_tx_idx = Some(self.iq.append(Entry::new(
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            TxType::Begin,
-            TxState::None)));
-
+        // Sync all objects
+        self.sync(None);
     }
 
     pub fn end_tx(&mut self) {
-        self.iq.append(Entry::new(
-            // TODO: move here?
-            self.read_set.clone(),
-            self.write_set.clone(),
-            self.operations.clone(),
-            TxType::End,
-            TxState::None));
+        self.iq.append(Entry::new(self.read_set.drain().collect(),
+                                  self.write_set.drain().collect(),
+                                  self.operations.drain(..).collect(),
+                                  TxType::End,
+                                  TxState::None));
         self.tx_mode = false;
     }
 
-    pub fn sync(&mut self, obj_id: ObjId) {
-        let mut rx;
-        if self.tx_mode {
-            self.read_set.push(obj_id);
-            rx = self.iq.stream_from_to(self.index[&obj_id],
-                                        self.begin_tx_idx);
-        } else {
-            rx = self.iq.stream_from_to(self.index[&obj_id], None);
+    pub fn sync(&mut self, obj_id: Option<ObjId>) {
+        // for tx, only record read
+        if obj_id.is_some() {
+            if self.tx_mode {
+                self.read_set.insert(obj_id.unwrap());
+                return;
+            }
+
         }
 
+        // sync all objects runtime tracks
+        let rx = self.iq.stream(&self.obj_ids, self.global_idx + 1, None);
+
         // send updates to relevant callbacks
-        let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
         loop {
             match rx.recv() {
                 Ok(e) => {
-                    let mut idx = self.index.get_mut(&obj_id).unwrap();
-                    *idx = e.idx.unwrap();
-                    for c in callbacks.iter_mut() {
-                        c(e.clone());
+                    for op in &e.operations {
+                        if !self.obj_ids.contains(&op.obj_id) {
+                            // entry also has operation on object not tracked
+                            continue;
+                        }
+
+                        // operation on tracked object sent to interested ds
+                        let mut callbacks = self.callbacks.get_mut(&op.obj_id).unwrap();
+                        for c in callbacks.iter_mut() {
+                            c(op.clone());
+                        }
                     }
+
+                    let idx = e.idx.unwrap();
+                    assert_eq!(idx, self.global_idx + 1);
+                    self.global_idx = idx as LogIndex;
                 }
-                Err(_) => break
-             };
+                Err(_) => break,
+            };
         }
     }
 
-    pub fn register_object(&mut self, obj_id: ObjId, c: Box<Callback>) {
+    pub fn catch_up(&mut self, obj_id: ObjId, mut c: &mut Box<Callback>) {
+        let rx = self.iq.stream(&vec![obj_id].into_iter().collect(),
+                                0,
+                                Some(self.global_idx + 1));
+
+        loop {
+            match rx.recv() {
+                Ok(e) => {
+                    for op in &e.operations {
+                        if obj_id != op.obj_id {
+                            // entry also has operation on different object
+                            continue;
+                        }
+
+                        (*c)(op.clone());
+                    }
+                }
+                Err(_) => break,
+            };
+        }
+    }
+
+    pub fn register_object(&mut self, obj_id: ObjId, mut c: Box<Callback>) {
+        self.obj_ids.insert(obj_id);
+
+        self.catch_up(obj_id, &mut c);
+
         if !self.callbacks.contains_key(&obj_id) {
             self.callbacks.insert(obj_id, Vec::new());
         }
         self.callbacks.get_mut(&obj_id).unwrap().push(c);
-
-        if !self.index.contains_key(&obj_id) {
-            self.index.insert(obj_id, 0);
-        }
     }
-
 }
 
-impl<T> Runtime<T>
-    where T: IndexedQueue {
-
+impl<T> Runtime<T> where T: IndexedQueue
+{
     pub fn new(iq: T) -> Runtime<T> {
         return Runtime {
             iq: iq,
+            obj_ids: HashSet::new(),
             callbacks: HashMap::new(),
-            index: HashMap::new(),
-            read_set: Vec::new(),
-            write_set: Vec::new(),
+            // index: HashMap::new(),
+            global_idx: -1 as LogIndex,
+            read_set: HashSet::new(),
+            write_set: HashSet::new(),
             operations: Vec::new(),
             tx_mode: false,
-            begin_tx_idx: None,
-        }
-     }
+        };
+    }
 }
 
 #[cfg(test)]
