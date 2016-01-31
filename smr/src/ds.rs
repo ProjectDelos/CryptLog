@@ -9,7 +9,7 @@ use indexed_queue::{Operation, IndexedQueue, State};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Register<T: IndexedQueue + Clone + 'static> {
+pub struct Register<T: IndexedQueue + Send + Clone + 'static> {
     runtime: Arc<Mutex<Runtime<T>>>,
     obj_id: i32,
 
@@ -23,7 +23,7 @@ pub enum RegisterOp {
     },
 }
 
-impl<T: IndexedQueue + Clone> Register<T> {
+impl<T: IndexedQueue + Clone + Send> Register<T> {
     fn new(aruntime: &Arc<Mutex<Runtime<T>>>, obj_id: i32, data: i32) -> Register<T> {
         let reg = Register {
             obj_id: obj_id,
@@ -33,7 +33,7 @@ impl<T: IndexedQueue + Clone> Register<T> {
         {
             let mut runtime = reg.runtime.lock().unwrap();
             let mut reg = reg.clone();
-            runtime.register_object(obj_id, Box::new(move |op: Operation| reg.callback(op)));
+            runtime.register_object(obj_id, Box::new(move |_, op: Operation| reg.callback(op)));
         }
         return reg;
     }
