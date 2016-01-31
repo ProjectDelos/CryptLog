@@ -5,11 +5,10 @@ extern crate rustc_serialize;
 use std::collections::{HashMap, HashSet};
 use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex};
 
-pub type Callback = FnMut(Operation);
-// use indexed_queue::LogIndex;
+pub type Callback = FnMut(LogIndex, Operation)+Send;
 
 pub struct Runtime<T>
-    where T: IndexedQueue
+    where T: IndexedQueue+Send
 {
     iq: T,
 
@@ -25,7 +24,7 @@ pub struct Runtime<T>
     tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
 }
 
-impl<T> Runtime<T> where T: IndexedQueue
+impl<T> Runtime<T> where T: IndexedQueue+Send
 {
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
@@ -81,7 +80,7 @@ impl<T> Runtime<T> where T: IndexedQueue
                         // operation on tracked object sent to interested ds
                         let mut callbacks = self.callbacks.get_mut(&op.obj_id).unwrap();
                         for c in callbacks.iter_mut() {
-                            c(op.clone());
+                            c(e.idx.unwrap(), op.clone());
                         }
                     }
 
@@ -108,7 +107,7 @@ impl<T> Runtime<T> where T: IndexedQueue
                             continue;
                         }
 
-                        (*c)(op.clone());
+                        (*c)(e.idx.unwrap(), op.clone());
                     }
                 }
                 Err(_) => break,
@@ -128,7 +127,7 @@ impl<T> Runtime<T> where T: IndexedQueue
     }
 }
 
-impl<T> Runtime<T> where T: IndexedQueue
+impl<T> Runtime<T> where T: IndexedQueue+Send
 {
     pub fn new(iq: T) -> Runtime<T> {
         return Runtime {
