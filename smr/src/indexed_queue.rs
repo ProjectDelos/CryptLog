@@ -1,6 +1,6 @@
 extern crate rustc_serialize;
 
-use std::collections::{VecDeque, HashSet};
+use std::collections::{VecDeque, HashSet, HashMap};
 use std::sync::{Mutex, Arc};
 
 // use self::rustc_serialize::json;
@@ -32,14 +32,14 @@ impl Operation {
     }
 }
 
-#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
 pub enum TxType {
     Begin,
     End,
     None,
 }
 
-#[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
 pub enum TxState {
     Accepted,
     Aborted,
@@ -49,25 +49,26 @@ pub enum TxState {
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
     pub idx: Option<LogIndex>,
-    read_set: HashSet<ObjId>,
-    write_set: HashSet<ObjId>,
+
+    pub reads: HashMap<ObjId, LogIndex>,
+    pub writes: HashSet<ObjId>,
     pub operations: Vec<Operation>,
 
-    tx_type: TxType,
-    tx_state: TxState,
+    pub tx_type: TxType,
+    pub tx_state: TxState,
 }
 
 impl Entry {
-    pub fn new(read_set: HashSet<ObjId>,
-               write_set: HashSet<ObjId>,
+    pub fn new(reads: HashMap<ObjId, LogIndex>,
+               writes: HashSet<ObjId>,
                operations: Vec<Operation>,
                tx_type: TxType,
                tx_state: TxState)
                -> Entry {
         return Entry {
             idx: None,
-            read_set: read_set,
-            write_set: write_set,
+            reads: reads,
+            writes: writes,
             operations: operations,
             tx_type: tx_type,
             tx_state: tx_state,
@@ -87,11 +88,15 @@ pub trait IndexedQueue {
 #[derive(Clone)]
 pub struct InMemoryQueue {
     q: VecDeque<Entry>,
+    version: HashMap<ObjId, LogIndex>,
 }
 
 impl InMemoryQueue {
     pub fn new() -> InMemoryQueue {
-        return InMemoryQueue { q: VecDeque::new() };
+        return InMemoryQueue {
+            q: VecDeque::new(),
+            version: HashMap::new(),
+        };
     }
 }
 
@@ -115,7 +120,7 @@ impl IndexedQueue for InMemoryQueue {
         };
 
         for i in from..to as LogIndex {
-            if !self.q[i as usize].write_set.is_disjoint(&obj_ids) {
+            if !self.q[i as usize].writes.is_disjoint(&obj_ids) {
                 // entry relevant to some obj_ids
                 tx.send(self.q[i as usize].clone()).unwrap();
             }
@@ -154,7 +159,7 @@ mod test {
     use super::State::Encoded;
     use std::thread;
     fn entry() -> Entry {
-        Entry::new(vec![0, 1, 2].into_iter().collect(),
+        Entry::new(vec![(0, 0), (1, 0), (2, 0)].into_iter().collect(),
                    vec![1, 2].into_iter().collect(),
                    vec![
                 Operation::new(0, Encoded("get(k0)".to_string())),

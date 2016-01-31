@@ -112,7 +112,6 @@ mod test {
                 reg2.write(x * 2);
             }
         }
-        println!("reg1 {} reg2 {}", reg1.read(), reg2.read());
 
         let mut reg1b = Register::new(&runtime, 1 as ObjId, 10);
         let mut reg2b = Register::new(&runtime, 2 as ObjId, 20);
@@ -121,5 +120,27 @@ mod test {
 
         reg1b.write(100);
         assert_eq!(reg1.read(), 100);
+    }
+
+    #[test]
+    fn transaction() {
+        let runtime = Arc::new(Mutex::new(Runtime::new(SharedQueue::new())));
+
+        let mut reg1 = Register::new(&runtime, 1 as ObjId, 10);
+        let mut reg2 = Register::new(&runtime, 2 as ObjId, 20);
+        let mut reg3 = Register::new(&runtime, 3 as ObjId, 0);
+
+        {
+            let mut runtime = runtime.lock().unwrap();
+            runtime.begin_tx();
+        }
+        let x = reg1.read();
+        let y = reg2.read();
+        reg3.write(x + y + 1);
+        {
+            let mut runtime = runtime.lock().unwrap();
+            runtime.end_tx();
+        }
+        assert_eq!(reg3.read(), 31);
     }
 }

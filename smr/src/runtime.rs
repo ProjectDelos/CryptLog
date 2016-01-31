@@ -14,25 +14,39 @@ pub struct Runtime<T>
     iq: T,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
-    // pub index: HashMap<ObjId, LogIndex>,
+    version: HashMap<ObjId, LogIndex>,
     pub global_idx: LogIndex,
     obj_ids: HashSet<ObjId>,
 
     // Transaction semantics
-    read_set: HashSet<ObjId>,
-    write_set: HashSet<ObjId>,
+    reads: HashMap<ObjId, LogIndex>,
+    writes: HashSet<ObjId>,
     operations: Vec<Operation>,
     tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
 }
 
 impl<T> Runtime<T> where T: IndexedQueue
 {
+    pub fn new(iq: T) -> Runtime<T> {
+        return Runtime {
+            iq: iq,
+            obj_ids: HashSet::new(),
+            callbacks: HashMap::new(),
+            version: HashMap::new(),
+            global_idx: -1 as LogIndex,
+
+            reads: HashMap::new(),
+            writes: HashSet::new(),
+            operations: Vec::new(),
+            tx_mode: false,
+        };
+    }
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
-            self.write_set.insert(obj_id);
+            self.writes.insert(obj_id);
             self.operations.push(Operation::new(obj_id, data));
         } else {
-            self.iq.append(Entry::new(HashSet::new(),
+            self.iq.append(Entry::new(HashMap::new(),
                                       vec![obj_id].into_iter().collect(),
                                       vec![Operation::new(obj_id, data)],
                                       TxType::None,
@@ -47,19 +61,40 @@ impl<T> Runtime<T> where T: IndexedQueue
     }
 
     pub fn end_tx(&mut self) {
-        self.iq.append(Entry::new(self.read_set.drain().collect(),
-                                  self.write_set.drain().collect(),
+        self.iq.append(Entry::new(self.reads.drain().collect(),
+                                  self.writes.drain().collect(),
                                   self.operations.drain(..).collect(),
                                   TxType::End,
                                   TxState::None));
         self.tx_mode = false;
     }
 
+    pub fn validate_tx(&mut self, e: &mut Entry) {
+        if e.tx_type == TxType::End && e.tx_state == TxState::None {
+            // validate based on versions
+            let obj_id: &LogIndex;
+            for (obj_id, version) in &e.reads {
+                if *version < self.version[obj_id] {
+                    e.tx_state = TxState::Aborted;
+                    return;
+                }
+            }
+            e.tx_state = TxState::Accepted;
+            // update versions
+            for obj_id in &e.writes {
+                let idx: &mut i64 = self.version.get_mut(obj_id).unwrap();
+                *idx = e.idx.unwrap();
+            }
+        }
+    }
+
+
     pub fn sync(&mut self, obj_id: Option<ObjId>) {
         // for tx, only record read
         if obj_id.is_some() {
             if self.tx_mode {
-                self.read_set.insert(obj_id.unwrap());
+                let obj_id = obj_id.unwrap();
+                self.reads.insert(obj_id, self.version[&obj_id]);
                 return;
             }
 
@@ -67,11 +102,15 @@ impl<T> Runtime<T> where T: IndexedQueue
 
         // sync all objects runtime tracks
         let rx = self.iq.stream(&self.obj_ids, self.global_idx + 1, None);
-
         // send updates to relevant callbacks
         loop {
             match rx.recv() {
-                Ok(e) => {
+                Ok(mut e) => {
+                    self.validate_tx(&mut e);
+                    if e.tx_state == TxState::Aborted {
+                        continue;
+                    }
+
                     for op in &e.operations {
                         if !self.obj_ids.contains(&op.obj_id) {
                             // entry also has operation on object not tracked
@@ -118,6 +157,9 @@ impl<T> Runtime<T> where T: IndexedQueue
 
     pub fn register_object(&mut self, obj_id: ObjId, mut c: Box<Callback>) {
         self.obj_ids.insert(obj_id);
+        if !self.version.contains_key(&obj_id) {
+            self.version.insert(obj_id, -1);
+        }
 
         self.catch_up(obj_id, &mut c);
 
@@ -128,22 +170,6 @@ impl<T> Runtime<T> where T: IndexedQueue
     }
 }
 
-impl<T> Runtime<T> where T: IndexedQueue
-{
-    pub fn new(iq: T) -> Runtime<T> {
-        return Runtime {
-            iq: iq,
-            obj_ids: HashSet::new(),
-            callbacks: HashMap::new(),
-            // index: HashMap::new(),
-            global_idx: -1 as LogIndex,
-            read_set: HashSet::new(),
-            write_set: HashSet::new(),
-            operations: Vec::new(),
-            tx_mode: false,
-        };
-    }
-}
 
 #[cfg(test)]
 mod test {
