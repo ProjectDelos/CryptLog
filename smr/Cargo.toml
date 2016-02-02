@@ -5,3 +5,4 @@ authors = ["Iulia Tamas <iulia.tamas@yale.edu>"]
 
 [dependencies]
 rustc-serialize = "0.3"
+chan = "0.1.14"
