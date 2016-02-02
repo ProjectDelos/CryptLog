@@ -4,7 +4,7 @@ extern crate rustc_serialize;
 use std::marker::PhantomData;
 
 use std::collections::{HashMap, HashSet};
-use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex};
+use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex, LogOp};
 
 pub type Callback = FnMut(LogIndex, Operation) + Send;
 
@@ -36,10 +36,7 @@ impl Encryptor for Identity {
     }
 }
 
-pub struct Runtime<T, Secure>
-    where T: IndexedQueue + Send,
-          Secure: Encryptor
-{
+pub struct Runtime<T, Secure> {
     iq: T,
     e: PhantomData<Secure>,
 
@@ -151,13 +148,21 @@ impl<Q, Secure> Runtime<Q, Secure>
                             // entry also has operation on object not tracked
                             continue;
                         }
+                        let obj_id = op.obj_id;
 
-                        // operation on tracked object sent to interested ds
-                        let mut callbacks = self.callbacks.get_mut(&op.obj_id).unwrap();
-                        let dec_operator = Secure::decrypt(op.operator.clone());
-                        for c in callbacks.iter_mut() {
-                            c(e.idx.unwrap(),
-                              Operation::new(op.obj_id, dec_operator.clone()));
+                        match op.operator {
+                            LogOp::Op(ref operator) => {
+                                // operation on tracked object sent to interested ds
+                                let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
+                                let dec_operator = Secure::decrypt(operator.clone());
+                                for c in callbacks.iter_mut() {
+                                    c(e.idx.unwrap(), Operation::new(obj_id, dec_operator.clone()));
+                                }
+
+                            }
+                            _ => {
+                                unimplemented!();
+                            }
                         }
                     }
 
@@ -184,8 +189,15 @@ impl<Q, Secure> Runtime<Q, Secure>
                             continue;
                         }
 
-                        let dec_operator = Secure::decrypt(op.operator.clone());
-                        (*c)(e.idx.unwrap(), Operation::new(op.obj_id, dec_operator));
+                        match op.operator {
+                            LogOp::Op(ref operator) => {
+                                let dec_operator = Secure::decrypt(operator.clone());
+                                (*c)(e.idx.unwrap(), Operation::new(obj_id, dec_operator));
+                            }
+                            _ => {
+                                unimplemented!();
+                            }
+                        }
                     }
                 }
                 Err(_) => break,

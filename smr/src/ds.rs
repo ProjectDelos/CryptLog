@@ -3,20 +3,34 @@
 
 extern crate rustc_serialize;
 use self::rustc_serialize::json;
+use self::rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
 
 use runtime::{Runtime, Encryptor};
-use indexed_queue::{Operation, IndexedQueue, State};
+use indexed_queue::{Operation, IndexedQueue, State, LogOp};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Register<Q, Secure>
-    where Q: IndexedQueue + Send + Clone + 'static,
-          Secure: Encryptor + Send + Clone + 'static
-{
-    runtime: Arc<Mutex<Runtime<Q, Secure>>>,
+pub struct Register<Q, Secure> {
+    runtime: Option<Arc<Mutex<Runtime<Q, Secure>>>>,
     obj_id: i32,
 
     data: Arc<Mutex<i32>>,
+}
+
+impl<Q, S> Decodable for Register<Q, S> {
+    fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
+        let data = try!(Decodable::decode(d));
+        let reg: Register<Q, S> = Register::default(data);
+        let res: Result<Self, D::Error> = Ok(reg);
+        return res;
+    }
+}
+
+impl<Q, Secure> Encodable for Register<Q, Secure> {
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        let data = self.data.lock().unwrap();
+        data.encode(s)
+    }
 }
 
 #[derive(RustcEncodable, RustcDecodable, Debug)]
@@ -26,41 +40,71 @@ pub enum RegisterOp {
     },
 }
 
-impl<Q, Secure> Register<Q, Secure>
-    where Q: IndexedQueue + Send + Clone,
-          Secure: Encryptor + Send + Clone
-{
+// where Q: IndexedQueue + Send + Clone,
+//      Secure: Encryptor + Send + Clone
+impl<Q, Secure> Register<Q, Secure> {
     fn new(aruntime: &Arc<Mutex<Runtime<Q, Secure>>>,
            obj_id: i32,
            data: i32)
            -> Register<Q, Secure> {
         let reg = Register {
             obj_id: obj_id,
-            runtime: aruntime.clone(),
+            runtime: Some(aruntime.clone()),
             data: Arc::new(Mutex::new(data)),
         };
-        {
-            let mut runtime = reg.runtime.lock().unwrap();
-            let mut reg = reg.clone();
-            runtime.register_object(obj_id, Box::new(move |_, op: Operation| reg.callback(op)));
-        }
         return reg;
     }
 
+    fn default(data: i32) -> Register<Q, Secure> {
+        Register {
+            obj_id: 0,
+            data: Arc::new(Mutex::new(data)),
+            runtime: None,
+        }
+    }
+}
+
+impl<Q, Secure> Register<Q, Secure>
+    where Q: 'static + IndexedQueue + Send + Clone,
+          Secure: 'static + Encryptor + Send + Clone
+{
+    fn start(&mut self) {
+        match self.runtime {
+            Some(ref runtime) => {
+                let mut runtime = runtime.lock().unwrap();
+                let mut reg = self.clone();
+                runtime.register_object(self.obj_id,
+                                        Box::new(move |_, op: Operation| reg.callback(op)));
+            }
+            None => panic!("invalid runtime"),
+        }
+    }
+
     fn read(&mut self) -> i32 {
-        self.runtime.lock().unwrap().sync(Some(self.obj_id));
-        return self.data.lock().unwrap().clone();
+        match self.runtime {
+            Some(ref runtime) => {
+                runtime.lock().unwrap().sync(Some(self.obj_id));
+                return self.data.lock().unwrap().clone();
+            }
+            None => panic!("invalid runtime"),
+        }
     }
 
     fn write(&mut self, val: i32) {
-        let mut runtime = self.runtime.lock().unwrap();
-        let op = RegisterOp::Write { data: val };
-        runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
+        match self.runtime {
+            Some(ref runtime) => {
+                let mut runtime = runtime.lock().unwrap();
+                let op = RegisterOp::Write { data: val };
+                runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
+            }
+            None => panic!("invalid runtime"),
+        }
     }
 
     fn callback(&mut self, op: Operation) {
         match op.operator {
-            State::Encoded(ref s) => {
+            LogOp::Op(State::Encoded(ref s)) => {
+                // TODO: with multiple-TX
                 let op = json::decode(&s).unwrap();
                 match op {
                     RegisterOp::Write{data} => {
@@ -69,8 +113,12 @@ impl<Q, Secure> Register<Q, Secure>
                     }
                 }
             }
+            LogOp::Snapshot(State::Encoded(ref s)) => {
+                let reg = json::decode(&s).unwrap();
+                *self = reg;
+            }
             _ => {
-                // nothing
+                unimplemented!();
             }
         }
     }
@@ -92,6 +140,7 @@ mod test {
         let obj_id = 1;
         let mut data = 15;
         let mut reg = Register::new(&aruntime, obj_id, data);
+        reg.start();
         assert_eq!(data, reg.read());
 
         for _ in 0..n {
@@ -99,7 +148,12 @@ mod test {
             reg.write(data);
             assert_eq!(data, reg.read());
         }
-        assert_eq!(reg.runtime.lock().unwrap().global_idx, n - 1);
+        match reg.runtime {
+            Some(ref runtime) => {
+                assert_eq!(runtime.lock().unwrap().global_idx, n - 1);
+            }
+            None => panic!("invalid runtime"),
+        }
     }
 
     #[test]
@@ -110,6 +164,8 @@ mod test {
 
         let mut reg1 = Register::new(&aruntime, 1 as ObjId, 1);
         let mut reg2 = Register::new(&aruntime, 2 as ObjId, 2);
+        reg1.start();
+        reg2.start();
 
         // reg1: 1 + 2 + 3 + 2 + 3
         // reg2: 2^5
@@ -126,7 +182,9 @@ mod test {
         }
 
         let mut reg1b = Register::new(&aruntime, 1 as ObjId, 10);
+        reg1b.start();
         let mut reg2b = Register::new(&aruntime, 2 as ObjId, 20);
+        reg2b.start();
         assert_eq!(reg1b.read(), 11);
         assert_eq!(reg2b.read(), 32);
 
@@ -143,6 +201,9 @@ mod test {
         let mut reg1 = Register::new(&aruntime, 1 as ObjId, 10);
         let mut reg2 = Register::new(&aruntime, 2 as ObjId, 20);
         let mut reg3 = Register::new(&aruntime, 3 as ObjId, 0);
+        reg1.start();
+        reg2.start();
+        reg3.start();
 
         {
             let mut runtime = aruntime.lock().unwrap();

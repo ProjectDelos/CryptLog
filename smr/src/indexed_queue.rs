@@ -18,16 +18,28 @@ pub enum State {
 }
 
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
+pub enum LogOp {
+    Snapshot(State),
+    Op(State),
+}
+
+#[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
 pub struct Operation {
     pub obj_id: ObjId, // hard coded
-    pub operator: State,
+    pub operator: LogOp,
 }
 
 impl Operation {
     pub fn new(obj_id: ObjId, operator: State) -> Operation {
         Operation {
             obj_id: obj_id,
-            operator: operator,
+            operator: LogOp::Op(operator),
+        }
+    }
+    pub fn from_snapshot(obj_id: ObjId, operator: State) -> Operation {
+        Operation {
+            obj_id: obj_id,
+            operator: LogOp::Snapshot(operator),
         }
     }
 }
