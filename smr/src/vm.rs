@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use indexed_queue::{IndexedQueue, ObjId, LogIndex, Operation};
-use runtime::{Runtime, Callback};
+use runtime::{Runtime, Encryptor, Callback};
 
 use self::SnapshotOp::*;
 use self::rustc_serialize::{json, Encodable};
@@ -200,10 +200,11 @@ impl Snapshotter for AsyncSnapshotter {
 //   Snapshotting: keep track of all objects and object ids
 //   Streaming: Keep track of skip list of entries for all objects
 pub struct VM<Q: IndexedQueue + Send,
+              Secure: Encryptor + Send,
               Skip: Skiplist + Clone + Send,
               Snap: Snapshotter + Clone + Send>
 {
-    runtime: Arc<Mutex<Runtime<Q>>>,
+    runtime: Arc<Mutex<Runtime<Q, Secure>>>,
     obj_id: Vec<ObjId>,
     skiplist: Skip,
     snapshots: Snap,
@@ -211,12 +212,13 @@ pub struct VM<Q: IndexedQueue + Send,
     stop: Arc<AtomicBool>,
 }
 
-impl<Q, Skip, Snap> VM<Q, Skip, Snap>
+impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
     where Q: 'static + IndexedQueue + Send,
+          Secure: 'static + Encryptor + Send,
           Skip: 'static + Skiplist + Clone + Send,
           Snap: 'static + Snapshotter + Clone + Send
 {
-    pub fn new(q: Q, skiplist: Skip, snapshotter: Snap) -> VM<Q, Skip, Snap> {
+    pub fn new(q: Q, skiplist: Skip, snapshotter: Snap) -> VM<Q, Secure, Skip, Snap> {
         let vm = VM {
             runtime: Arc::new(Mutex::new(Runtime::new(q))),
             obj_id: Vec::new(),
@@ -281,8 +283,9 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
     }
 }
 
-impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
+impl<Q, Secure, Skip, Snap> Drop for VM<Q, Secure, Skip, Snap>
     where Q: IndexedQueue + Send,
+          Secure: Encryptor + Send,
           Skip: Skiplist + Clone + Send,
           Snap: Snapshotter + Clone + Send
 {
@@ -303,11 +306,12 @@ impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
 mod test {
     use super::*;
     use indexed_queue::SharedQueue;
+    use runtime::Identity;
 
     #[test]
     fn vm() {
         let q = SharedQueue::new();
-        let mut vm: VM<SharedQueue, MapSkiplist, AsyncSnapshotter> =
+        let mut vm: VM<SharedQueue, Identity, MapSkiplist, AsyncSnapshotter> =
             VM::new(q, MapSkiplist::new(), AsyncSnapshotter::new());
     }
 }

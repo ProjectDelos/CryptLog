@@ -4,13 +4,16 @@
 extern crate rustc_serialize;
 use self::rustc_serialize::json;
 
-use runtime::Runtime;
+use runtime::{Runtime, Encryptor};
 use indexed_queue::{Operation, IndexedQueue, State};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Register<T: IndexedQueue + Send + Clone + 'static> {
-    runtime: Arc<Mutex<Runtime<T>>>,
+pub struct Register<Q, Secure>
+    where Q: IndexedQueue + Send + Clone + 'static,
+          Secure: Encryptor + Send + Clone + 'static
+{
+    runtime: Arc<Mutex<Runtime<Q, Secure>>>,
     obj_id: i32,
 
     data: Arc<Mutex<i32>>,
@@ -23,8 +26,14 @@ pub enum RegisterOp {
     },
 }
 
-impl<T: IndexedQueue + Clone + Send> Register<T> {
-    fn new(aruntime: &Arc<Mutex<Runtime<T>>>, obj_id: i32, data: i32) -> Register<T> {
+impl<Q, Secure> Register<Q, Secure>
+    where Q: IndexedQueue + Send + Clone,
+          Secure: Encryptor + Send + Clone
+{
+    fn new(aruntime: &Arc<Mutex<Runtime<Q, Secure>>>,
+           obj_id: i32,
+           data: i32)
+           -> Register<Q, Secure> {
         let reg = Register {
             obj_id: obj_id,
             runtime: aruntime.clone(),
@@ -51,7 +60,6 @@ impl<T: IndexedQueue + Clone + Send> Register<T> {
 
     fn callback(&mut self, op: Operation) {
         match op.operator {
-            // TODO: with multiple-TX
             State::Encoded(ref s) => {
                 let op = json::decode(&s).unwrap();
                 match op {
@@ -70,18 +78,20 @@ impl<T: IndexedQueue + Clone + Send> Register<T> {
 
 #[cfg(test)]
 mod test {
-    use runtime::Runtime;
+    use runtime::{Runtime, Identity};
     use indexed_queue::{InMemoryQueue, SharedQueue, ObjId};
     use super::Register;
     use std::sync::{Arc, Mutex};
 
     #[test]
     fn read_write_register() {
-        let runtime = Arc::new(Mutex::new(Runtime::new(InMemoryQueue::new())));
+        let q = InMemoryQueue::new();
+        let runtime: Runtime<InMemoryQueue, Identity> = Runtime::new(q);
+        let aruntime = Arc::new(Mutex::new(runtime));
         let n = 5;
         let obj_id = 1;
         let mut data = 15;
-        let mut reg = Register::new(&runtime, obj_id, data);
+        let mut reg = Register::new(&aruntime, obj_id, data);
         assert_eq!(data, reg.read());
 
         for _ in 0..n {
@@ -94,10 +104,12 @@ mod test {
 
     #[test]
     fn multiple_clients() {
-        let runtime = Arc::new(Mutex::new(Runtime::new(SharedQueue::new())));
+        let q = SharedQueue::new();
+        let runtime: Runtime<SharedQueue, Identity> = Runtime::new(q);
+        let aruntime = Arc::new(Mutex::new(runtime));
 
-        let mut reg1 = Register::new(&runtime, 1 as ObjId, 1);
-        let mut reg2 = Register::new(&runtime, 2 as ObjId, 2);
+        let mut reg1 = Register::new(&aruntime, 1 as ObjId, 1);
+        let mut reg2 = Register::new(&aruntime, 2 as ObjId, 2);
 
         // reg1: 1 + 2 + 3 + 2 + 3
         // reg2: 2^5
@@ -113,8 +125,8 @@ mod test {
             }
         }
 
-        let mut reg1b = Register::new(&runtime, 1 as ObjId, 10);
-        let mut reg2b = Register::new(&runtime, 2 as ObjId, 20);
+        let mut reg1b = Register::new(&aruntime, 1 as ObjId, 10);
+        let mut reg2b = Register::new(&aruntime, 2 as ObjId, 20);
         assert_eq!(reg1b.read(), 11);
         assert_eq!(reg2b.read(), 32);
 
@@ -124,21 +136,23 @@ mod test {
 
     #[test]
     fn transaction() {
-        let runtime = Arc::new(Mutex::new(Runtime::new(SharedQueue::new())));
+        let q = SharedQueue::new();
+        let runtime: Runtime<SharedQueue, Identity> = Runtime::new(q);
+        let aruntime = Arc::new(Mutex::new(runtime));
 
-        let mut reg1 = Register::new(&runtime, 1 as ObjId, 10);
-        let mut reg2 = Register::new(&runtime, 2 as ObjId, 20);
-        let mut reg3 = Register::new(&runtime, 3 as ObjId, 0);
+        let mut reg1 = Register::new(&aruntime, 1 as ObjId, 10);
+        let mut reg2 = Register::new(&aruntime, 2 as ObjId, 20);
+        let mut reg3 = Register::new(&aruntime, 3 as ObjId, 0);
 
         {
-            let mut runtime = runtime.lock().unwrap();
+            let mut runtime = aruntime.lock().unwrap();
             runtime.begin_tx();
         }
         let x = reg1.read();
         let y = reg2.read();
         reg3.write(x + y + 1);
         {
-            let mut runtime = runtime.lock().unwrap();
+            let mut runtime = aruntime.lock().unwrap();
             runtime.end_tx();
         }
         assert_eq!(reg3.read(), 31);

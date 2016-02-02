@@ -1,16 +1,47 @@
 extern crate rustc_serialize;
 
 // use self::rustc_serialize::json;
+use std::marker::PhantomData;
 
 use std::collections::{HashMap, HashSet};
 use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex};
 
 pub type Callback = FnMut(LogIndex, Operation) + Send;
 
-pub struct Runtime<T>
-    where T: IndexedQueue + Send
+pub trait Encryptor {
+    fn encrypt(s: State) -> State;
+    fn decrypt(s: State) -> State;
+}
+
+#[derive(Clone)]
+pub struct Identity;
+impl Identity {
+    pub fn new() -> Identity {
+        return Identity;
+    }
+}
+impl Encryptor for Identity {
+    fn encrypt(state: State) -> State {
+        return match state {
+            State::Encoded(s) => State::Encrypted(s.into_bytes()),
+            State::Encrypted(_) => panic!("already encrypted"), 
+        };
+    }
+
+    fn decrypt(state: State) -> State {
+        return match state {
+            State::Encoded(_) => panic!("already decrypted"),
+            State::Encrypted(v) => State::Encoded(String::from_utf8(v).unwrap()),
+        };
+    }
+}
+
+pub struct Runtime<T, Secure>
+    where T: IndexedQueue + Send,
+          Secure: Encryptor
 {
     iq: T,
+    e: PhantomData<Secure>,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
     version: HashMap<ObjId, LogIndex>,
@@ -24,11 +55,15 @@ pub struct Runtime<T>
     tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
 }
 
-impl<T> Runtime<T> where T: IndexedQueue + Send
+impl<Q, Secure> Runtime<Q, Secure>
+    where Q: IndexedQueue + Send,
+          Secure: Encryptor
 {
-    pub fn new(iq: T) -> Runtime<T> {
+    pub fn new(iq: Q) -> Runtime<Q, Secure> {
         return Runtime {
             iq: iq,
+            e: PhantomData,
+
             obj_ids: HashSet::new(),
             callbacks: HashMap::new(),
             version: HashMap::new(),
@@ -43,11 +78,11 @@ impl<T> Runtime<T> where T: IndexedQueue + Send
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
             self.writes.insert(obj_id);
-            self.operations.push(Operation::new(obj_id, data));
+            self.operations.push(Operation::new(obj_id, Secure::encrypt(data)));
         } else {
             self.iq.append(Entry::new(HashMap::new(),
                                       vec![obj_id].into_iter().collect(),
-                                      vec![Operation::new(obj_id, data)],
+                                      vec![Operation::new(obj_id, Secure::encrypt(data))],
                                       TxType::None,
                                       TxState::None));
         }
@@ -66,6 +101,7 @@ impl<T> Runtime<T> where T: IndexedQueue + Send
                                   TxType::End,
                                   TxState::None));
         self.tx_mode = false;
+        // TODO: wait for tx validation and return ok or err
     }
 
     pub fn validate_tx(&mut self, e: &mut Entry) {
@@ -118,8 +154,10 @@ impl<T> Runtime<T> where T: IndexedQueue + Send
 
                         // operation on tracked object sent to interested ds
                         let mut callbacks = self.callbacks.get_mut(&op.obj_id).unwrap();
+                        let dec_operator = Secure::decrypt(op.operator.clone());
                         for c in callbacks.iter_mut() {
-                            c(e.idx.unwrap(), op.clone());
+                            c(e.idx.unwrap(),
+                              Operation::new(op.obj_id, dec_operator.clone()));
                         }
                     }
 
@@ -146,7 +184,8 @@ impl<T> Runtime<T> where T: IndexedQueue + Send
                             continue;
                         }
 
-                        (*c)(e.idx.unwrap(), op.clone());
+                        let dec_operator = Secure::decrypt(op.operator.clone());
+                        (*c)(e.idx.unwrap(), Operation::new(op.obj_id, dec_operator));
                     }
                 }
                 Err(_) => break,
@@ -172,12 +211,13 @@ impl<T> Runtime<T> where T: IndexedQueue + Send
 
 #[cfg(test)]
 mod test {
-    use super::Runtime;
+    use super::{Runtime, Identity};
     use indexed_queue::{InMemoryQueue, State};
 
     #[test]
     fn create_runtime() {
-        let mut r: Runtime<InMemoryQueue> = Runtime::new(InMemoryQueue::new());
+        let q = InMemoryQueue::new();
+        let mut r: Runtime<InMemoryQueue, Identity> = Runtime::new(q);
         r.append(0, State::Encoded(String::from("Hello")));
     }
 }
