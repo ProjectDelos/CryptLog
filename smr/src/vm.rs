@@ -18,6 +18,7 @@ use self::chan::{Sender, Receiver, WaitGroup};
 use self::SnapshotOp::*;
 use self::rustc_serialize::{json, Encodable};
 
+#[derive(Debug)]
 enum SnapshotOp {
     SnapshotRequest(WaitGroup, LogIndex),
     LogOp(LogIndex, Operation),
@@ -38,7 +39,7 @@ pub trait Skiplist {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> HashSet<LogIndex>;
+              -> Vec<LogIndex>;
     fn gc(&mut self, idx: LogIndex);
 }
 
@@ -67,8 +68,8 @@ impl Skiplist for MapSkiplist {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> HashSet<LogIndex> {
-        let mut set = HashSet::new();
+              -> Vec<LogIndex> {
+        let mut set : HashSet<LogIndex> = HashSet::new();
         let skiplist = self.skiplist.lock().unwrap();
         for obj in skiplist.keys() {
             if obj_ids.contains(obj) {
@@ -79,7 +80,9 @@ impl Skiplist for MapSkiplist {
                 }
             }
         }
-        return set;
+        let mut v : Vec<LogIndex> = set.drain().collect();
+        v.sort();
+        return v;
     }
 
     fn gc(&mut self, idx: LogIndex) {
@@ -107,7 +110,6 @@ pub trait Snapshotter {
     fn get_snapshots(&self, obj_ids: &HashSet<ObjId>) -> HashMap<ObjId, Snapshot>;
     fn exec(&mut self, obj_id: ObjId, idx: LogIndex, op: Operation);
     fn start(&mut self);
-    fn stop(&mut self);
 }
 
 // Per object threads and channels to send to each object
@@ -228,17 +230,13 @@ impl Snapshotter for AsyncSnapshotter {
         }
         return target;
     }
+}
 
-    fn stop(&mut self) {
+impl Drop for AsyncSnapshotter {
+    fn drop(&mut self) {
         // Tell all per object threads threads to stop (register_object) -> snapshots_tx will close
         for chan in self.obj_chan.values() {
             chan.send(Stop);
-        }
-
-        // wait for all threads to stop
-        let mut threads = self.threads.lock().unwrap();
-        for thread in threads.drain(..) {
-            thread.join().unwrap();
         }
     }
 }
@@ -257,8 +255,8 @@ pub struct VM<Q: IndexedQueue + Send,
     runtime: Arc<Mutex<Runtime<Q, Secure>>>,
     obj_id: Vec<ObjId>,
     local_queue: Arc<Mutex<HashMap<LogIndex, Entry>>>,
-    skiplist: Skip,
-    snapshots: Snap,
+    skiplist: Arc<Mutex<Skip>>,
+    snapshots: Arc<Mutex<Snap>>,
     threads: Vec<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
     queue: Q,
@@ -276,8 +274,8 @@ impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
             runtime: Arc::new(Mutex::new(Runtime::new(q))),
             obj_id: Vec::new(),
             local_queue: Arc::new(Mutex::new(HashMap::new())),
-            skiplist: skiplist,
-            snapshots: snapshotter,
+            skiplist: Arc::new(Mutex::new(skiplist)),
+            snapshots: Arc::new(Mutex::new(snapshotter)),
             threads: Vec::new(),
             stop: Arc::new(AtomicBool::new(false)),
             queue: queue,
@@ -290,21 +288,22 @@ impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
         // Start constructing skip list.
         // Skip list stores all indices in the log for each entry.
         // TODO: Should be garbage collected occasionally after snapshotting.
-        let obj_id = self.obj_id.clone();
         let seen = Box::new(Arc::new(AtomicUsize::new(0)));
-        for id in obj_id {
-            let mut snapshotter = self.snapshots.clone();
-            let mut skiplist = self.skiplist.clone();
+        {
+            let snapshotter = self.snapshots.clone();
+            let skiplist = self.skiplist.clone();
             let seen = seen.clone();
             let local_queue = self.local_queue.clone();
-            let vm_callback = Box::new(move |idx: LogIndex, op: Operation| {
+            let vm_callback = Box::new(move |entry: Entry| {
                 let seen = seen.fetch_add(1, SeqCst);
-                // Add index to the skiplist
-                skiplist.append(id, idx);
-                // Send the entry async to the object
-                snapshotter.exec(id, idx, op);
-                if seen % 100 == 0 {
-                    snapshotter.snapshot(idx);
+                let idx = entry.idx.unwrap();
+                {
+                    // Add this entry to the local queue
+                    local_queue.lock().unwrap().insert(idx, entry);
+                }
+                // Every once in a while take snapshots of all objects and gc
+                if (seen+1) % 100 == 0 {
+                    snapshotter.lock().unwrap().snapshot(idx);
                     // gc local queue
                     let mut local_queue = local_queue.lock().unwrap();
                     let mut new_queue = HashMap::new();
@@ -314,13 +313,13 @@ impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
                         }
                     }
                     // Leave 100 entries in case clients are reading from them
-                    skiplist.gc(idx - 50);
+                    skiplist.lock().unwrap().gc(idx - 50);
                 }
             });
-            self.runtime.lock().unwrap().register_object(id, vm_callback);
+            self.runtime.lock().unwrap().register_log_reader(vm_callback);
         }
 
-        self.snapshots.start();
+        self.snapshots.lock().unwrap().start();
         self.poll_runtime();
     }
 
@@ -348,9 +347,19 @@ impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
                                                                       obj_id: ObjId,
                                                                       callback: Box<Callback>,
                                                                       obj: Snapshottable) {
-        self.skiplist.insert(obj_id);
+        self.skiplist.lock().unwrap().insert(obj_id);
         self.obj_id.push(obj_id);
-        self.snapshots.register_object(obj_id, callback, obj);
+
+        let skiplist = self.skiplist.clone();
+        let snapshotter = self.snapshots.clone();
+        self.snapshots.lock().unwrap().register_object(obj_id, callback, obj);
+        let cb = Box::new(move |idx, op: Operation| {
+            // Add this index to the skiplist
+            skiplist.lock().unwrap().append(obj_id, idx);
+            // Execute this entry on the snapshotter for this object
+            snapshotter.lock().unwrap().exec(obj_id, idx, op.clone());
+        });
+        self.runtime.lock().unwrap().register_object(obj_id, cb);
     }
 }
 
@@ -371,17 +380,17 @@ impl<Q, Secure, Skip, Snap> IndexedQueue for VM<Q, Secure, Skip, Snap>
               -> mpsc::Receiver<Entry> {
 
         let (tx, rx) = mpsc::channel();
-        let snaps = self.snapshots.get_snapshots(obj_ids);
-        for (id, snapshot) in snaps {
+        let snaps = self.snapshots.lock().unwrap().get_snapshots(obj_ids);
+        for (_, snapshot) in snaps {
             if from <= snapshot.idx && (to.is_none() || snapshot.idx <= to.unwrap()) {
                 from = snapshot.idx; // all snapshots are guaranteed to have the same index
-                //tx.send(Snapshot(snapshot));
+                // tx.send(Snapshot(snapshot));
             }
         }
-        let idxs = self.skiplist.stream(obj_ids, from, to);
+        let idxs = self.skiplist.lock().unwrap().stream(obj_ids, from, to);
         for idx in idxs {
             let local_queue = self.local_queue.lock().unwrap();
-            let entry = local_queue[&idx].clone();
+            let entry = local_queue.get(&idx).expect("skiplist entries should be in local log").clone();
             tx.send(entry).unwrap();
         }
         return rx;
@@ -401,23 +410,102 @@ impl<Q, Secure, Skip, Snap> Drop for VM<Q, Secure, Skip, Snap>
         for t in self.threads.drain(..) {
             t.join().unwrap();
         }
-        // Stop snapshotter
-        println!("STOPPING SNAPSHOTTER");
-        self.snapshots.stop();
-        println!("VM STOPPED");
+        // Snapshotter stops on drop snapshotter
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use indexed_queue::SharedQueue;
-    use runtime::Identity;
+    extern crate rustc_serialize;
+    use self::rustc_serialize::json;
+
+    use indexed_queue::{SharedQueue, IndexedQueue, ObjId, Operation, LogOp, State};
+    use runtime::{Identity, Runtime};
+    use ds::{Register, RegisterOp};
+    use std::sync::{Arc, Mutex};
+    use std::thread::{sleep};
+    use std::time::Duration;
 
     #[test]
-    fn vm() {
+    fn skiplist_test() {
+        let mut skiplist = MapSkiplist::new();
+        let obj0 = vec![0, 2, 4, 5, 9];
+        let obj1 = vec![0, 1, 5, 7, 9, 10];
+        let objs = vec![obj0, obj1];
+        skiplist.insert(0);
+        skiplist.insert(1);
+        for obj in 0..objs.len() {
+            for &idx in &objs[obj] {
+                skiplist.append(obj as ObjId, idx);
+            }
+        }
+        let stream = skiplist.stream(&[0, 1].iter().cloned().collect(), 0, Some(4));
+        assert_eq!(stream, [0, 1, 2, 4]);
+        let stream = skiplist.stream(&[0, 1].iter().cloned().collect(), 1, Some(5));
+        assert_eq!(stream, [1, 2, 4, 5]);
+        let stream = skiplist.stream(&[0].iter().cloned().collect(), 0, None);
+        assert_eq!(stream, [0, 2, 4, 5, 9]);
+        // gc test
+        skiplist.gc(4);
+        let stream = skiplist.stream(&[0, 1].iter().cloned().collect(), 0, None);
+        assert_eq!(stream, [4, 5, 7, 9, 10]);
+    }
+    #[test]
+    fn snapshot_test() {
         let q = SharedQueue::new();
-        let vm: VM<SharedQueue, Identity, MapSkiplist, AsyncSnapshotter> =
+        let mut snapshotter = AsyncSnapshotter::new();
+        let runtime: Arc<Mutex<Runtime<SharedQueue, Identity>>> =
+            Arc::new(Mutex::new(Runtime::new(q)));
+        let reg = Register::new(&runtime, 0, -1);
+        let mut reg2 = reg.clone();
+        snapshotter.register_object(0, Box::new(move |_, e| reg2.callback(e)), reg);
+        snapshotter.start();
+        for i in 0..10 {
+            let reg_op = RegisterOp::Write { data: i };
+            snapshotter.exec(0,
+                             0,
+                             Operation {
+                                 obj_id: 0,
+                                 operator: LogOp::Op(State::Encoded(json::encode(&reg_op).unwrap())),
+                             });
+        }
+        snapshotter.snapshot(10);
+        let snaps = snapshotter.get_snapshots(&[0].iter().cloned().collect());
+        for (_, s) in snaps {
+            assert_eq!(s.idx, 10);
+            let reg: Register<SharedQueue, Identity> = json::decode(&s.payload).unwrap();
+            let data = reg.data.lock().unwrap();
+            assert_eq!(*data, 9);
+        }
+    }
+    #[test]
+    fn vm_streaming() {
+        let q = SharedQueue::new();
+        let mut vm: VM<SharedQueue, Identity, MapSkiplist, AsyncSnapshotter> =
             VM::new(q, MapSkiplist::new(), AsyncSnapshotter::new());
+        let mut reg = Register::new(&vm.runtime, 0, -1);
+        let reg1 = reg.clone();
+        let mut reg2 = reg.clone();
+        // register the Register with the VM
+        vm.register_object(0, Box::new(move |_, e| reg2.callback(e)), reg1);
+        vm.start();
+
+        for i in 0..10 {
+            reg.write(i);
+        }
+
+        // TODO: do we want to be able to read our own writes? probably...
+        // assert_eq!(reg.read(), 9);
+
+
+        vm.runtime.lock().unwrap().sync(Some(0));
+        let mut i = 0;
+        let entries = vm.stream(&[0].iter().cloned().collect(), 0, None);
+        for e in entries {
+            assert_eq!(i, e.idx.unwrap());
+            i += 1;
+        }
+        assert_eq!(i, 10);
     }
 }

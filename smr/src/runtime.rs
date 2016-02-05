@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex, LogOp};
 
 pub type Callback = FnMut(LogIndex, Operation) + Send;
+pub type EntryCallback = FnMut(Entry) + Send;
 
 pub trait Encryptor {
     fn encrypt(s: State) -> State;
@@ -41,6 +42,7 @@ pub struct Runtime<T, Secure> {
     e: PhantomData<Secure>,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
+    entry_callbacks: Vec<Box<EntryCallback>>,
     version: HashMap<ObjId, LogIndex>,
     pub global_idx: LogIndex,
     obj_ids: HashSet<ObjId>,
@@ -63,6 +65,7 @@ impl<Q, Secure> Runtime<Q, Secure>
 
             obj_ids: HashSet::new(),
             callbacks: HashMap::new(),
+            entry_callbacks: Vec::new(),
             version: HashMap::new(),
             global_idx: -1 as LogIndex,
 
@@ -104,7 +107,6 @@ impl<Q, Secure> Runtime<Q, Secure>
     pub fn validate_tx(&mut self, e: &mut Entry) {
         if e.tx_type == TxType::End && e.tx_state == TxState::None {
             // validate based on versions
-            let obj_id: &LogIndex;
             for (obj_id, version) in &e.reads {
                 if *version < self.version[obj_id] {
                     e.tx_state = TxState::Aborted;
@@ -138,10 +140,17 @@ impl<Q, Secure> Runtime<Q, Secure>
         loop {
             match rx.recv() {
                 Ok(mut e) => {
+                    // replicate entries to entry_callbacks
+                    for cb in self.entry_callbacks.iter_mut() {
+                        let e = e.clone();
+                        cb(e);
+                    }
+
                     self.validate_tx(&mut e);
                     if e.tx_state == TxState::Aborted {
                         continue;
                     }
+                    let idx = e.idx.clone().unwrap();
 
                     for op in &e.operations {
                         if !self.obj_ids.contains(&op.obj_id) {
@@ -156,7 +165,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                                 let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
                                 let dec_operator = Secure::decrypt(operator.clone());
                                 for c in callbacks.iter_mut() {
-                                    c(e.idx.unwrap(), Operation::new(obj_id, dec_operator.clone()));
+                                    c(idx, Operation::new(obj_id, dec_operator.clone()));
                                 }
 
                             }
@@ -166,7 +175,6 @@ impl<Q, Secure> Runtime<Q, Secure>
                         }
                     }
 
-                    let idx = e.idx.unwrap();
                     assert_eq!(idx, self.global_idx + 1);
                     self.global_idx = idx as LogIndex;
                 }
@@ -217,6 +225,9 @@ impl<Q, Secure> Runtime<Q, Secure>
             self.callbacks.insert(obj_id, Vec::new());
         }
         self.callbacks.get_mut(&obj_id).unwrap().push(c);
+    }
+    pub fn register_log_reader(&mut self, c: Box<EntryCallback>) {
+        self.entry_callbacks.push(c);
     }
 }
 

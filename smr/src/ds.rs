@@ -14,7 +14,7 @@ pub struct Register<Q, Secure> {
     runtime: Option<Arc<Mutex<Runtime<Q, Secure>>>>,
     obj_id: i32,
 
-    data: Arc<Mutex<i32>>,
+    pub data: Arc<Mutex<i32>>,
 }
 
 impl<Q, S> Decodable for Register<Q, S> {
@@ -43,7 +43,7 @@ pub enum RegisterOp {
 // where Q: IndexedQueue + Send + Clone,
 //      Secure: Encryptor + Send + Clone
 impl<Q, Secure> Register<Q, Secure> {
-    fn new(aruntime: &Arc<Mutex<Runtime<Q, Secure>>>,
+    pub fn new(aruntime: &Arc<Mutex<Runtime<Q, Secure>>>,
            obj_id: i32,
            data: i32)
            -> Register<Q, Secure> {
@@ -68,6 +68,7 @@ impl<Q, Secure> Register<Q, Secure>
     where Q: 'static + IndexedQueue + Send + Clone,
           Secure: 'static + Encryptor + Send + Clone
 {
+    #[allow(dead_code)]
     fn start(&mut self) {
         match self.runtime {
             Some(ref runtime) => {
@@ -80,7 +81,7 @@ impl<Q, Secure> Register<Q, Secure>
         }
     }
 
-    fn read(&mut self) -> i32 {
+    pub fn read(&mut self) -> i32 {
         match self.runtime {
             Some(ref runtime) => {
                 runtime.lock().unwrap().sync(Some(self.obj_id));
@@ -90,7 +91,7 @@ impl<Q, Secure> Register<Q, Secure>
         }
     }
 
-    fn write(&mut self, val: i32) {
+    pub fn write(&mut self, val: i32) {
         match self.runtime {
             Some(ref runtime) => {
                 let mut runtime = runtime.lock().unwrap();
@@ -101,7 +102,7 @@ impl<Q, Secure> Register<Q, Secure>
         }
     }
 
-    fn callback(&mut self, op: Operation) {
+    pub fn callback(&mut self, op: Operation) {
         match op.operator {
             LogOp::Op(State::Encoded(ref s)) => {
                 // TODO: with multiple-TX

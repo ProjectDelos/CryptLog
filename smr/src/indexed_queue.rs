@@ -117,7 +117,7 @@ impl IndexedQueue for InMemoryQueue {
         e.idx = Some(self.q.len() as LogIndex);
         // println!("InMemoryQueue::append {:?}", e);
         self.q.push_back(e);
-        return self.q.len() as LogIndex;
+        return (self.q.len() - 1) as LogIndex;
     }
 
     fn stream(&self,
@@ -188,9 +188,9 @@ mod test {
     fn in_memory() {
         let mut q = InMemoryQueue::new();
         let n = 5;
-        for _ in 0..n {
+        for i in 0..n {
             let e = entry();
-            q.append(e);
+            assert_eq!(q.append(e), i as LogIndex);
         }
         let rx = q.stream(&vec![0, 1, 2].into_iter().collect(), 0, None);
         let mut read = 0;
