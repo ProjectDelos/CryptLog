@@ -124,6 +124,7 @@ impl<Q, Secure> Runtime<Q, Secure>
 
 
     pub fn sync(&mut self, obj_id: Option<ObjId>) {
+        use indexed_queue::LogData::{LogEntry, LogSnapshot};
         // for tx, only record read
         if obj_id.is_some() {
             if self.tx_mode {
@@ -139,7 +140,7 @@ impl<Q, Secure> Runtime<Q, Secure>
         // send updates to relevant callbacks
         loop {
             match rx.recv() {
-                Ok(mut e) => {
+                Ok(LogEntry(mut e)) => {
                     // replicate entries to entry_callbacks
                     for cb in self.entry_callbacks.iter_mut() {
                         let e = e.clone();
@@ -178,19 +179,23 @@ impl<Q, Secure> Runtime<Q, Secure>
                     assert_eq!(idx, self.global_idx + 1);
                     self.global_idx = idx as LogIndex;
                 }
+                Ok(LogSnapshot(mut s)) => {
+                    unimplemented!();
+                }
                 Err(_) => break,
             };
         }
     }
 
     pub fn catch_up(&mut self, obj_id: ObjId, mut c: &mut Box<Callback>) {
+        use indexed_queue::LogData::{LogEntry, LogSnapshot};
         let rx = self.iq.stream(&vec![obj_id].into_iter().collect(),
                                 0,
                                 Some(self.global_idx + 1));
 
         loop {
             match rx.recv() {
-                Ok(e) => {
+                Ok(LogEntry(e)) => {
                     for op in &e.operations {
                         if obj_id != op.obj_id {
                             // entry also has operation on different object
@@ -208,6 +213,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                         }
                     }
                 }
+                Ok(LogSnapshot(s)) => unimplemented!(),
                 Err(_) => break,
             };
         }

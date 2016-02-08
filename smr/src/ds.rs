@@ -68,8 +68,7 @@ impl<Q, Secure> Register<Q, Secure>
     where Q: 'static + IndexedQueue + Send + Clone,
           Secure: 'static + Encryptor + Send + Clone
 {
-    #[allow(dead_code)]
-    fn start(&mut self) {
+    pub fn start(&mut self) {
         match self.runtime {
             Some(ref runtime) => {
                 let mut runtime = runtime.lock().unwrap();

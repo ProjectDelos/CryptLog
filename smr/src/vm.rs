@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use std::sync::mpsc;
 
-use indexed_queue::{IndexedQueue, ObjId, LogIndex, Operation, Entry};
+use indexed_queue::{IndexedQueue, ObjId, LogIndex, Operation, Entry, LogData, Snapshot};
 use runtime::{Runtime, Encryptor, Callback};
 
 use self::chan::{Sender, Receiver, WaitGroup};
@@ -23,13 +23,6 @@ enum SnapshotOp {
     SnapshotRequest(WaitGroup, LogIndex),
     LogOp(LogIndex, Operation),
     Stop,
-}
-
-#[derive(Clone)]
-pub struct Snapshot {
-    obj_id: ObjId,
-    idx: LogIndex,
-    payload: String,
 }
 
 pub trait Skiplist {
@@ -69,7 +62,7 @@ impl Skiplist for MapSkiplist {
               from: LogIndex,
               to: Option<LogIndex>)
               -> Vec<LogIndex> {
-        let mut set : HashSet<LogIndex> = HashSet::new();
+        let mut set: HashSet<LogIndex> = HashSet::new();
         let skiplist = self.skiplist.lock().unwrap();
         for obj in skiplist.keys() {
             if obj_ids.contains(obj) {
@@ -80,7 +73,7 @@ impl Skiplist for MapSkiplist {
                 }
             }
         }
-        let mut v : Vec<LogIndex> = set.drain().collect();
+        let mut v: Vec<LogIndex> = set.drain().collect();
         v.sort();
         return v;
     }
@@ -155,12 +148,7 @@ impl Snapshotter for AsyncSnapshotter {
                     SnapshotRequest(wg, idx) => {
                         let snap = json::encode(&obj).unwrap();
                         // send the snapshot to the snapshot aggregator/sender
-                        snapshots_tx.send((wg,
-                                           Snapshot {
-                            obj_id: obj_id,
-                            idx: idx,
-                            payload: snap,
-                        }));
+                        snapshots_tx.send((wg, Snapshot::new(obj_id, idx, snap)));
                     }
                     LogOp(idx, op) => {
                         callback(idx, op);
@@ -302,7 +290,7 @@ impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
                     local_queue.lock().unwrap().insert(idx, entry);
                 }
                 // Every once in a while take snapshots of all objects and gc
-                if (seen+1) % 100 == 0 {
+                if (seen + 1) % 100 == 0 {
                     snapshotter.lock().unwrap().snapshot(idx);
                     // gc local queue
                     let mut local_queue = local_queue.lock().unwrap();
@@ -377,21 +365,27 @@ impl<Q, Secure, Skip, Snap> IndexedQueue for VM<Q, Secure, Skip, Snap>
               obj_ids: &HashSet<ObjId>,
               mut from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry> {
-
+              -> mpsc::Receiver<LogData> {
+        use indexed_queue::LogData::{LogEntry, LogSnapshot};
+        from -= 1;
         let (tx, rx) = mpsc::channel();
         let snaps = self.snapshots.lock().unwrap().get_snapshots(obj_ids);
         for (_, snapshot) in snaps {
             if from <= snapshot.idx && (to.is_none() || snapshot.idx <= to.unwrap()) {
                 from = snapshot.idx; // all snapshots are guaranteed to have the same index
-                // tx.send(Snapshot(snapshot));
+                tx.send(LogSnapshot(snapshot)).unwrap();
             }
         }
         let idxs = self.skiplist.lock().unwrap().stream(obj_ids, from, to);
         for idx in idxs {
+            if idx <= from {
+                continue;
+            }
             let local_queue = self.local_queue.lock().unwrap();
-            let entry = local_queue.get(&idx).expect("skiplist entries should be in local log").clone();
-            tx.send(entry).unwrap();
+            let entry = local_queue.get(&idx)
+                                   .expect("skiplist entries should be in local log")
+                                   .clone();
+            tx.send(LogEntry(entry)).unwrap();
         }
         return rx;
     }
@@ -421,10 +415,11 @@ mod test {
     use self::rustc_serialize::json;
 
     use indexed_queue::{SharedQueue, IndexedQueue, ObjId, Operation, LogOp, State};
+    use indexed_queue::LogData::{LogEntry};
     use runtime::{Identity, Runtime};
     use ds::{Register, RegisterOp};
     use std::sync::{Arc, Mutex};
-    use std::thread::{sleep};
+    use std::thread::sleep;
     use std::time::Duration;
 
     #[test]
@@ -503,9 +498,63 @@ mod test {
         let mut i = 0;
         let entries = vm.stream(&[0].iter().cloned().collect(), 0, None);
         for e in entries {
-            assert_eq!(i, e.idx.unwrap());
-            i += 1;
+            match e {
+                LogEntry(e) => {
+                    assert_eq!(i, e.idx.unwrap());
+                    i += 1;
+                }
+                _ => panic!("should not snapshot: too few entries"),
+            }
         }
         assert_eq!(i, 10);
+    }
+    #[test]
+    fn vm_full() {
+        let q = SharedQueue::new();
+        let mut vm: VM<SharedQueue, Identity, MapSkiplist, AsyncSnapshotter> =
+            VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
+        let mut reg = Register::new(&vm.runtime, 0, -1);
+        let reg1 = reg.clone();
+        // register the Register with the VM
+        vm.register_object(0, Box::new(move |_, e| reg.callback(e)), reg1);
+        vm.start();
+
+
+        let run: Runtime<SharedQueue, Identity> = Runtime::new(q);
+        let run = Arc::new(Mutex::new(run));
+        let mut reg = Register::new(&run.clone(), 0, -1);
+        reg.start();
+
+        for i in 0..150 {
+            reg.write(i);
+        }
+
+        // TODO: do we want to be able to read our own writes? probably...
+        // assert_eq!(reg.read(), 9);
+
+
+        vm.runtime.lock().unwrap().sync(Some(0));
+        let mut i = 0;
+        let entries = vm.stream(&[0].iter().cloned().collect(), 0, None);
+
+        let e = entries.recv().unwrap();
+        match e {
+            LogEntry(_) => panic!("first response should be snapshot"),
+            _ => {}
+        }
+
+        for e in entries {
+            match e {
+                LogEntry(e) => {
+                    assert_eq!(i + 100, e.idx.unwrap());
+                    i += 1;
+                },
+                _ => panic!("should only be one snapshot"),
+            }
+        }
+        assert_eq!(i, 50);
+        sleep(Duration::new(1, 0));
+        assert_eq!(reg.read(), 149);
+        // Now try to recover new register from VM: needs snapshots
     }
 }

@@ -58,6 +58,30 @@ pub enum TxState {
     None,
 }
 
+#[derive(Clone)]
+pub struct Snapshot {
+    pub obj_id: ObjId,
+    pub idx: LogIndex,
+    pub payload: String,
+}
+
+impl Snapshot {
+    pub fn new(obj_id: ObjId, idx: LogIndex, payload: String) -> Snapshot {
+        Snapshot {
+            obj_id: obj_id,
+            idx: idx,
+            payload: payload,
+        }
+    }
+}
+
+
+#[derive(Clone)]
+pub enum LogData {
+    LogEntry(Entry),
+    LogSnapshot(Snapshot),
+}
+
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
     pub idx: Option<LogIndex>,
@@ -94,7 +118,7 @@ pub trait IndexedQueue {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry>;
+              -> mpsc::Receiver<LogData>;
 }
 
 #[derive(Clone)]
@@ -124,7 +148,8 @@ impl IndexedQueue for InMemoryQueue {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry> {
+              -> mpsc::Receiver<LogData> {
+        use self::LogData::LogEntry;
         let (tx, rx) = mpsc::channel();
         let to = match to {
             Some(idx) => idx,
@@ -134,7 +159,7 @@ impl IndexedQueue for InMemoryQueue {
         for i in from..to as LogIndex {
             if !self.q[i as usize].writes.is_disjoint(&obj_ids) {
                 // entry relevant to some obj_ids
-                tx.send(self.q[i as usize].clone()).unwrap();
+                tx.send(LogEntry(self.q[i as usize].clone())).unwrap();
             }
         }
         return rx;
@@ -160,7 +185,7 @@ impl IndexedQueue for SharedQueue {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry> {
+              -> mpsc::Receiver<LogData> {
         self.q.lock().unwrap().stream(obj_ids, from, to)
     }
 }
@@ -169,6 +194,7 @@ impl IndexedQueue for SharedQueue {
 mod test {
     use super::*;
     use super::State::Encoded;
+    use super::LogData::{LogEntry};
     use std::thread;
     fn entry() -> Entry {
         Entry::new(vec![(0, 0), (1, 0), (2, 0)].into_iter().collect(),
@@ -196,9 +222,14 @@ mod test {
         let mut read = 0;
         let ent = entry();
         for e in rx {
-            assert_eq!(e.idx.unwrap(), read);
-            assert_eq!(e.operations[0], ent.operations[0]);
-            read += 1;
+            match e {
+                LogEntry(e) => {
+                    assert_eq!(e.idx.unwrap(), read);
+                    assert_eq!(e.operations[0], ent.operations[0]);
+                    read += 1;
+                }
+                _ => panic!("should not snapshot: too few entries"),
+            }
             // assert_eq!(e, entry);
         }
         assert_eq!(read, n);
@@ -228,8 +259,13 @@ mod test {
         let rx = q3.stream(&vec![0, 1, 2].into_iter().collect(), 0, None);
         let mut read = 0;
         for e in rx {
-            assert_eq!(e.idx.unwrap(), read);
-            read += 1;
+            match e {
+                LogEntry(e) => {
+                    assert_eq!(e.idx.unwrap(), read);
+                    read += 1;
+                }
+                _ => panic!("should not snapshot: too few entries"),
+            }
         }
         assert_eq!(read, n * 2);
     }
