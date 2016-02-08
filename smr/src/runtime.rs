@@ -179,7 +179,17 @@ impl<Q, Secure> Runtime<Q, Secure>
                     assert_eq!(idx, self.global_idx + 1);
                     self.global_idx = idx as LogIndex;
                 }
-                Ok(LogSnapshot(mut s)) => {
+                Ok(LogSnapshot(s)) => {
+                    if !self.obj_ids.contains(&s.obj_id) {
+                        continue;
+                    }
+                    let obj_id = s.obj_id;
+                    let idx = s.idx;
+                    let callbacks = self.callbacks.get_mut(&obj_id).unwrap();
+                    let snapshot = Secure::decrypt(s.payload);
+                    for c in callbacks.iter_mut() {
+                        c(idx, Operation::from_snapshot(obj_id, snapshot.clone()));
+                    }
                     unimplemented!();
                 }
                 Err(_) => break,
@@ -213,7 +223,10 @@ impl<Q, Secure> Runtime<Q, Secure>
                         }
                     }
                 }
-                Ok(LogSnapshot(s)) => unimplemented!(),
+                Ok(LogSnapshot(s)) => {
+                    let snapshot = Secure::decrypt(s.payload);
+                    (*c)(s.idx, Operation::from_snapshot(obj_id, snapshot));
+                }
                 Err(_) => break,
             };
         }

@@ -62,11 +62,11 @@ pub enum TxState {
 pub struct Snapshot {
     pub obj_id: ObjId,
     pub idx: LogIndex,
-    pub payload: String,
+    pub payload: State,
 }
 
 impl Snapshot {
-    pub fn new(obj_id: ObjId, idx: LogIndex, payload: String) -> Snapshot {
+    pub fn new(obj_id: ObjId, idx: LogIndex, payload: State) -> Snapshot {
         Snapshot {
             obj_id: obj_id,
             idx: idx,

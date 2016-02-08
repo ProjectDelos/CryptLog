@@ -12,6 +12,7 @@ use std::sync::mpsc;
 
 use indexed_queue::{IndexedQueue, ObjId, LogIndex, Operation, Entry, LogData, Snapshot};
 use runtime::{Runtime, Encryptor, Callback};
+use indexed_queue::State::Encoded;
 
 use self::chan::{Sender, Receiver, WaitGroup};
 
@@ -148,7 +149,7 @@ impl Snapshotter for AsyncSnapshotter {
                     SnapshotRequest(wg, idx) => {
                         let snap = json::encode(&obj).unwrap();
                         // send the snapshot to the snapshot aggregator/sender
-                        snapshots_tx.send((wg, Snapshot::new(obj_id, idx, snap)));
+                        snapshots_tx.send((wg, Snapshot::new(obj_id, idx, Encoded(snap))));
                     }
                     LogOp(idx, op) => {
                         callback(idx, op);
@@ -416,6 +417,7 @@ mod test {
 
     use indexed_queue::{SharedQueue, IndexedQueue, ObjId, Operation, LogOp, State};
     use indexed_queue::LogData::{LogEntry};
+    use indexed_queue::State::Encoded;
     use runtime::{Identity, Runtime};
     use ds::{Register, RegisterOp};
     use std::sync::{Arc, Mutex};
@@ -469,9 +471,14 @@ mod test {
         let snaps = snapshotter.get_snapshots(&[0].iter().cloned().collect());
         for (_, s) in snaps {
             assert_eq!(s.idx, 10);
-            let reg: Register<SharedQueue, Identity> = json::decode(&s.payload).unwrap();
-            let data = reg.data.lock().unwrap();
-            assert_eq!(*data, 9);
+            match s.payload {
+                Encoded(s) => {
+                    let reg: Register<SharedQueue, Identity> = json::decode(&s).unwrap();
+                    let data = reg.data.lock().unwrap();
+                    assert_eq!(*data, 9);
+                },
+                _ => panic!("should never be encrypted in this test"),
+            }
         }
     }
     #[test]
