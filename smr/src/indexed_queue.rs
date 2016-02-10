@@ -1,12 +1,18 @@
 extern crate rustc_serialize;
+extern crate hyper;
 
 use std::collections::{VecDeque, HashSet, HashMap};
 use std::sync::{Mutex, Arc};
-
-// use self::rustc_serialize::json;
-use self::rustc_serialize::Encodable;
-
 use std::sync::mpsc;
+use std::io::Read;
+
+use self::rustc_serialize::json;
+use self::rustc_serialize::{Encodable, Decodable};
+use self::hyper::Client;
+// use self::hyper::client::response::Response;
+use self::hyper::header::Connection;
+
+use http_data::{HttpRequest, HttpResponse};
 
 pub type LogIndex = i64;
 pub type ObjId = i32;
@@ -100,15 +106,11 @@ pub trait IndexedQueue {
 #[derive(Clone)]
 pub struct InMemoryQueue {
     q: VecDeque<Entry>,
-    version: HashMap<ObjId, LogIndex>,
 }
 
 impl InMemoryQueue {
     pub fn new() -> InMemoryQueue {
-        return InMemoryQueue {
-            q: VecDeque::new(),
-            version: HashMap::new(),
-        };
+        return InMemoryQueue { q: VecDeque::new() };
     }
 }
 
@@ -117,6 +119,7 @@ impl IndexedQueue for InMemoryQueue {
         e.idx = Some(self.q.len() as LogIndex);
         // println!("InMemoryQueue::append {:?}", e);
         self.q.push_back(e);
+
         return self.q.len() as LogIndex;
     }
 
@@ -125,12 +128,12 @@ impl IndexedQueue for InMemoryQueue {
               from: LogIndex,
               to: Option<LogIndex>)
               -> mpsc::Receiver<Entry> {
-        let (tx, rx) = mpsc::channel();
         let to = match to {
             Some(idx) => idx,
             None => self.q.len() as LogIndex,
         };
 
+        let (tx, rx) = mpsc::channel();
         for i in from..to as LogIndex {
             if !self.q[i as usize].writes.is_disjoint(&obj_ids) {
                 // entry relevant to some obj_ids
@@ -165,10 +168,80 @@ impl IndexedQueue for SharedQueue {
     }
 }
 
+pub struct HttpClient {
+    c: Client,
+    to_server: String,
+}
+
+impl HttpClient {
+    fn new(to_server: &str) -> HttpClient {
+        return HttpClient {
+            c: Client::new(),
+            to_server: String::from(to_server),
+        };
+    }
+
+    fn to_server(&self) -> String {
+        return self.to_server.clone();
+    }
+}
+
+impl IndexedQueue for HttpClient {
+    fn stream(&self,
+              obj_ids: &HashSet<ObjId>,
+              from: LogIndex,
+              to: Option<LogIndex>)
+              -> mpsc::Receiver<Entry> {
+        let body = json::encode(&HttpRequest::Stream(obj_ids.clone(), from, to)).unwrap();
+        let mut http_resp = self.c
+                                .post(&self.to_server)
+                                .header(Connection::keep_alive())
+                                .body(&body)
+                                .send()
+                                .unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut resp = String::new();
+        http_resp.read_to_string(&mut resp).unwrap();
+        let resp = json::decode(&resp).unwrap();
+        match resp {
+            HttpResponse::Stream(ref entries) => {
+                for e in entries {
+                    tx.send(e.clone()).unwrap();
+                }
+            }
+            _ => panic!("http_client::stream::wrong response type"),
+        };
+        return rx;
+    }
+
+    fn append(&mut self, e: Entry) -> LogIndex {
+        // let e = json::encode(&e).unwrap();
+        let e = HttpRequest::Append(e);
+        let body = json::encode(&e).unwrap();
+        let mut http_resp = self.c
+                                .post(&self.to_server)
+                                .header(Connection::keep_alive())
+                                .body(&body)
+                                .send()
+                                .unwrap();
+        let mut resp = String::new();
+        http_resp.read_to_string(&mut resp).unwrap();
+        let resp = json::decode(&resp).unwrap();
+        match resp {
+            HttpResponse::Append(idx) => {
+                return idx;
+            }
+            _ => panic!("http_client::append::wrong response type"),
+        };
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
     use super::State::Encoded;
+    use std::sync::mpsc;
     use std::thread;
     fn entry() -> Entry {
         Entry::new(vec![(0, 0), (1, 0), (2, 0)].into_iter().collect(),
@@ -184,24 +257,29 @@ mod test {
                    TxState::None)
     }
 
-    #[test]
-    fn in_memory() {
-        let mut q = InMemoryQueue::new();
-        let n = 5;
-        for _ in 0..n {
-            let e = entry();
-            q.append(e);
-        }
-        let rx = q.stream(&vec![0, 1, 2].into_iter().collect(), 0, None);
+    fn stream_works(rx: mpsc::Receiver<Entry>, n: LogIndex) -> bool {
         let mut read = 0;
         let ent = entry();
         for e in rx {
             assert_eq!(e.idx.unwrap(), read);
             assert_eq!(e.operations[0], ent.operations[0]);
             read += 1;
-            // assert_eq!(e, entry);
         }
         assert_eq!(read, n);
+        return true;
+    }
+
+    #[test]
+    fn in_memory() {
+        let mut q = InMemoryQueue::new();
+        let n = 5;
+        let obj_ids = &vec![0, 1, 2].into_iter().collect();
+        for _ in 0..n {
+            let e = entry();
+            q.append(e);
+        }
+        let rx = q.stream(&obj_ids, 0, None);
+        assert_eq!(stream_works(rx, n), true);
     }
 
     #[test]
@@ -210,6 +288,7 @@ mod test {
         let mut q2 = q1.clone();
         let q3 = q1.clone();
         let n = 5;
+        let obj_ids = &vec![0, 1, 2].into_iter().collect();
 
         let child1 = thread::spawn(move || {
             // some work here
@@ -225,12 +304,45 @@ mod test {
         child1.join().unwrap();
         child2.join().unwrap();
 
-        let rx = q3.stream(&vec![0, 1, 2].into_iter().collect(), 0, None);
-        let mut read = 0;
-        for e in rx {
-            assert_eq!(e.idx.unwrap(), read);
-            read += 1;
+        let rx = q3.stream(&obj_ids, 0, None);
+        assert_eq!(stream_works(rx, n * 2), true);
+    }
+
+
+    use http_server::HttpServer;
+    enum ThreadMssg {
+        Close,
+    }
+    #[test]
+    fn http_client_server() {
+        // More of an integration test
+        let to_server = "http://127.0.0.1:6767";
+        let server_addr = "127.0.0.1:6767";
+        let (tx, rx) = mpsc::channel();
+
+        let mut q = HttpClient::new(to_server);
+        let child = thread::spawn(move || {
+            let mut s = HttpServer::new(InMemoryQueue::new(), server_addr);
+            match rx.recv().unwrap() {
+                ThreadMssg::Close => {
+                    s.close();
+                }
+            }
+
+        });
+
+        // client sends over some work via append
+        let n = 5;
+        let obj_ids = &vec![0, 1, 2].into_iter().collect();
+        for _ in 0..n {
+            q.append(entry());
         }
-        assert_eq!(read, n * 2);
+
+        // stream back the work
+        let stream_rx = q.stream(&obj_ids, 0, None);
+        assert_eq!(stream_works(stream_rx, n), true);
+
+        tx.send(ThreadMssg::Close).unwrap();
+        child.join().unwrap();
     }
 }

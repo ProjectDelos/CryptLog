@@ -36,8 +36,8 @@ impl Encryptor for Identity {
     }
 }
 
-pub struct Runtime<T, Secure> {
-    iq: T,
+pub struct Runtime<Q, Secure> {
+    iq: Q,
     e: PhantomData<Secure>,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
@@ -104,7 +104,6 @@ impl<Q, Secure> Runtime<Q, Secure>
     pub fn validate_tx(&mut self, e: &mut Entry) {
         if e.tx_type == TxType::End && e.tx_state == TxState::None {
             // validate based on versions
-            let obj_id: &LogIndex;
             for (obj_id, version) in &e.reads {
                 if *version < self.version[obj_id] {
                     e.tx_state = TxState::Aborted;

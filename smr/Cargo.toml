@@ -1,8 +1,10 @@
 [package]
 name = "smr"
 version = "0.1.0"
-authors = ["Iulia Tamas <iulia.tamas@yale.edu>"]
+authors = ["Iulia Tamas <iulia.tamas@yale.edu>",
+          "Dylan Visher <dvisher1@gmail.com>"]
 
 [dependencies]
 rustc-serialize = "0.3"
+hyper = "0.7"
 chan = "0.1.14"
