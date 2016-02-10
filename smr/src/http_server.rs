@@ -9,7 +9,7 @@ use self::hyper::Server;
 use self::hyper::net::Fresh;
 use self::hyper::server::{Handler, Request, Response, Listening};
 
-use indexed_queue::{IndexedQueue, LogIndex, Entry};
+use indexed_queue::{IndexedQueue, LogIndex, Entry, LogData};
 use http_data::{HttpRequest, HttpResponse};
 
 pub struct HttpServer<Q: 'static> {
@@ -42,7 +42,7 @@ impl<Q: IndexedQueue + Send> Handler for HttpHandler<Q> {
                         resp.send(r.as_bytes()).unwrap();
                     }
                     HttpRequest::Stream(ref obj_ids, from, to) => {
-                        let mut entries: Vec<Entry> = Vec::new();
+                        let mut entries: Vec<LogData> = Vec::new();
                         let rx = self.iq.lock().unwrap().stream(obj_ids, from, to);
                         for e in &rx {
                             entries.push(e);

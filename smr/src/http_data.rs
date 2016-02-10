@@ -3,11 +3,11 @@ use self::rustc_serialize::{Encodable, Decodable};
 
 use std::collections::HashSet;
 
-use indexed_queue::{Entry, LogIndex, ObjId};
+use indexed_queue::{LogData, Entry, LogIndex, ObjId};
 
-#[derive(RustcEncodable, RustcDecodable, Debug)]
+#[derive(RustcEncodable, RustcDecodable)]
 pub enum HttpResponse {
-    Stream(Vec<Entry>),
+    Stream(Vec<LogData>),
     Append(LogIndex),
 }
 

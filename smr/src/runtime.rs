@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex, LogOp};
 
 pub type Callback = FnMut(LogIndex, Operation) + Send;
+pub type EntryCallback = FnMut(Entry) + Send;
 
 pub trait Encryptor {
     fn encrypt(s: State) -> State;
@@ -41,6 +42,7 @@ pub struct Runtime<Q, Secure> {
     e: PhantomData<Secure>,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
+    entry_callbacks: Vec<Box<EntryCallback>>,
     version: HashMap<ObjId, LogIndex>,
     pub global_idx: LogIndex,
     obj_ids: HashSet<ObjId>,
@@ -63,6 +65,7 @@ impl<Q, Secure> Runtime<Q, Secure>
 
             obj_ids: HashSet::new(),
             callbacks: HashMap::new(),
+            entry_callbacks: Vec::new(),
             version: HashMap::new(),
             global_idx: -1 as LogIndex,
 
@@ -121,6 +124,7 @@ impl<Q, Secure> Runtime<Q, Secure>
 
 
     pub fn sync(&mut self, obj_id: Option<ObjId>) {
+        use indexed_queue::LogData::{LogEntry, LogSnapshot};
         // for tx, only record read
         if obj_id.is_some() {
             if self.tx_mode {
@@ -136,11 +140,18 @@ impl<Q, Secure> Runtime<Q, Secure>
         // send updates to relevant callbacks
         loop {
             match rx.recv() {
-                Ok(mut e) => {
+                Ok(LogEntry(mut e)) => {
+                    // replicate entries to entry_callbacks
+                    for cb in self.entry_callbacks.iter_mut() {
+                        let e = e.clone();
+                        cb(e);
+                    }
+
                     self.validate_tx(&mut e);
                     if e.tx_state == TxState::Aborted {
                         continue;
                     }
+                    let idx = e.idx.clone().unwrap();
 
                     for op in &e.operations {
                         if !self.obj_ids.contains(&op.obj_id) {
@@ -155,7 +166,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                                 let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
                                 let dec_operator = Secure::decrypt(operator.clone());
                                 for c in callbacks.iter_mut() {
-                                    c(e.idx.unwrap(), Operation::new(obj_id, dec_operator.clone()));
+                                    c(idx, Operation::new(obj_id, dec_operator.clone()));
                                 }
 
                             }
@@ -165,9 +176,21 @@ impl<Q, Secure> Runtime<Q, Secure>
                         }
                     }
 
-                    let idx = e.idx.unwrap();
                     assert_eq!(idx, self.global_idx + 1);
                     self.global_idx = idx as LogIndex;
+                }
+                Ok(LogSnapshot(s)) => {
+                    if !self.obj_ids.contains(&s.obj_id) {
+                        continue;
+                    }
+                    let obj_id = s.obj_id;
+                    let idx = s.idx;
+                    let callbacks = self.callbacks.get_mut(&obj_id).unwrap();
+                    let snapshot = Secure::decrypt(s.payload);
+                    for c in callbacks.iter_mut() {
+                        c(idx, Operation::from_snapshot(obj_id, snapshot.clone()));
+                    }
+                    unimplemented!();
                 }
                 Err(_) => break,
             };
@@ -175,13 +198,14 @@ impl<Q, Secure> Runtime<Q, Secure>
     }
 
     pub fn catch_up(&mut self, obj_id: ObjId, mut c: &mut Box<Callback>) {
+        use indexed_queue::LogData::{LogEntry, LogSnapshot};
         let rx = self.iq.stream(&vec![obj_id].into_iter().collect(),
                                 0,
                                 Some(self.global_idx + 1));
 
         loop {
             match rx.recv() {
-                Ok(e) => {
+                Ok(LogEntry(e)) => {
                     for op in &e.operations {
                         if obj_id != op.obj_id {
                             // entry also has operation on different object
@@ -198,6 +222,10 @@ impl<Q, Secure> Runtime<Q, Secure>
                             }
                         }
                     }
+                }
+                Ok(LogSnapshot(s)) => {
+                    let snapshot = Secure::decrypt(s.payload);
+                    (*c)(s.idx, Operation::from_snapshot(obj_id, snapshot));
                 }
                 Err(_) => break,
             };
@@ -216,6 +244,9 @@ impl<Q, Secure> Runtime<Q, Secure>
             self.callbacks.insert(obj_id, Vec::new());
         }
         self.callbacks.get_mut(&obj_id).unwrap().push(c);
+    }
+    pub fn register_log_reader(&mut self, c: Box<EntryCallback>) {
+        self.entry_callbacks.push(c);
     }
 }
 

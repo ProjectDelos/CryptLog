@@ -64,6 +64,30 @@ pub enum TxState {
     None,
 }
 
+#[derive(Clone, RustcEncodable, RustcDecodable)]
+pub struct Snapshot {
+    pub obj_id: ObjId,
+    pub idx: LogIndex,
+    pub payload: State,
+}
+
+impl Snapshot {
+    pub fn new(obj_id: ObjId, idx: LogIndex, payload: State) -> Snapshot {
+        Snapshot {
+            obj_id: obj_id,
+            idx: idx,
+            payload: payload,
+        }
+    }
+}
+
+
+#[derive(Clone, RustcEncodable, RustcDecodable)]
+pub enum LogData {
+    LogEntry(Entry),
+    LogSnapshot(Snapshot),
+}
+
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
     pub idx: Option<LogIndex>,
@@ -100,7 +124,7 @@ pub trait IndexedQueue {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry>;
+              -> mpsc::Receiver<LogData>;
 }
 
 #[derive(Clone)]
@@ -119,15 +143,15 @@ impl IndexedQueue for InMemoryQueue {
         e.idx = Some(self.q.len() as LogIndex);
         // println!("InMemoryQueue::append {:?}", e);
         self.q.push_back(e);
-
-        return self.q.len() as LogIndex;
+        return (self.q.len() - 1) as LogIndex;
     }
 
     fn stream(&self,
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry> {
+              -> mpsc::Receiver<LogData> {
+        use self::LogData::LogEntry;
         let to = match to {
             Some(idx) => idx,
             None => self.q.len() as LogIndex,
@@ -137,7 +161,7 @@ impl IndexedQueue for InMemoryQueue {
         for i in from..to as LogIndex {
             if !self.q[i as usize].writes.is_disjoint(&obj_ids) {
                 // entry relevant to some obj_ids
-                tx.send(self.q[i as usize].clone()).unwrap();
+                tx.send(LogEntry(self.q[i as usize].clone())).unwrap();
             }
         }
         return rx;
@@ -163,7 +187,7 @@ impl IndexedQueue for SharedQueue {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry> {
+              -> mpsc::Receiver<LogData> {
         self.q.lock().unwrap().stream(obj_ids, from, to)
     }
 }
@@ -191,7 +215,7 @@ impl IndexedQueue for HttpClient {
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
-              -> mpsc::Receiver<Entry> {
+              -> mpsc::Receiver<LogData> {
         let body = json::encode(&HttpRequest::Stream(obj_ids.clone(), from, to)).unwrap();
         let mut http_resp = self.c
                                 .post(&self.to_server)
@@ -241,8 +265,15 @@ impl IndexedQueue for HttpClient {
 mod test {
     use super::*;
     use super::State::Encoded;
-    use std::sync::mpsc;
+    use super::LogData::LogEntry;
     use std::thread;
+    use std::sync::mpsc;
+
+    use http_server::HttpServer;
+    enum ThreadMssg {
+        Close,
+    }
+
     fn entry() -> Entry {
         Entry::new(vec![(0, 0), (1, 0), (2, 0)].into_iter().collect(),
                    vec![1, 2].into_iter().collect(),
@@ -257,13 +288,18 @@ mod test {
                    TxState::None)
     }
 
-    fn stream_works(rx: mpsc::Receiver<Entry>, n: LogIndex) -> bool {
+    fn stream_works(rx: mpsc::Receiver<LogData>, n: LogIndex) -> bool {
         let mut read = 0;
         let ent = entry();
         for e in rx {
-            assert_eq!(e.idx.unwrap(), read);
-            assert_eq!(e.operations[0], ent.operations[0]);
-            read += 1;
+            match e {
+                LogEntry(e) => {
+                    assert_eq!(e.idx.unwrap(), read);
+                    assert_eq!(e.operations[0], ent.operations[0]);
+                    read += 1;
+                }
+                _ => panic!("should not snapshot: too few entries"),
+            }
         }
         assert_eq!(read, n);
         return true;
@@ -274,9 +310,9 @@ mod test {
         let mut q = InMemoryQueue::new();
         let n = 5;
         let obj_ids = &vec![0, 1, 2].into_iter().collect();
-        for _ in 0..n {
+        for i in 0..n {
             let e = entry();
-            q.append(e);
+            assert_eq!(q.append(e), i as LogIndex);
         }
         let rx = q.stream(&obj_ids, 0, None);
         assert_eq!(stream_works(rx, n), true);
@@ -309,10 +345,6 @@ mod test {
     }
 
 
-    use http_server::HttpServer;
-    enum ThreadMssg {
-        Close,
-    }
     #[test]
     fn http_client_server() {
         // More of an integration test
