@@ -1,10 +1,10 @@
-// Compilation slowed significantly
-// by code and imports that appear dead
-// because they are currently only used in tests
 #![allow(dead_code)]
-#![allow(unused_imports)]
+#![feature(custom_derive, plugin)]
+#![plugin(serde_macros)]
 
 extern crate hyper;
+extern crate serde;
+extern crate serde_json;
 extern crate rustc_serialize;
 
 pub mod runtime;

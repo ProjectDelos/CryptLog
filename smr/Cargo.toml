@@ -8,3 +8,6 @@ authors = ["Iulia Tamas <iulia.tamas@yale.edu>",
 rustc-serialize = "0.3"
 hyper = "0.7"
 chan = "0.1.14"
+serde = "*"
+serde_json = "*"
+serde_macros = "*"

@@ -362,7 +362,7 @@ impl<Q, Secure, Skip, Snap> IndexedQueue for VM<Q, Secure, Skip, Snap>
         self.queue.append(e)
     }
 
-    fn stream(&self,
+    fn stream(&mut self,
               obj_ids: &HashSet<ObjId>,
               mut from: LogIndex,
               to: Option<LogIndex>)
