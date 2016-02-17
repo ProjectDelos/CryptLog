@@ -7,7 +7,7 @@ use self::rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
 
 use runtime::{Runtime, Encryptor};
 use indexed_queue::{Operation, IndexedQueue, State, LogOp};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::collections::BTreeMap;
 
 #[derive(Clone)]
@@ -70,37 +70,39 @@ impl<Q, Secure> Register<Q, Secure>
     where Q: 'static + IndexedQueue + Send + Clone,
           Secure: 'static + Encryptor + Send + Clone
 {
+    fn with_runtime<R, T, F>(&self, f: F) -> T
+        where F: FnOnce(MutexGuard<Runtime<Q, Secure>>) -> T
+    {
+        assert!(self.runtime.is_some(), "invalid runtime");
+        self.runtime
+            .as_ref()
+            .map(|runtime| {
+                let runtime = runtime.lock().unwrap();
+                f(runtime)
+            })
+            .unwrap()
+    }
+
     pub fn start(&mut self) {
-        match self.runtime {
-            Some(ref runtime) => {
-                let mut runtime = runtime.lock().unwrap();
-                let mut reg = self.clone();
-                runtime.register_object(self.obj_id,
-                                        Box::new(move |_, op: Operation| reg.callback(op)));
-            }
-            None => panic!("invalid runtime"),
-        }
+        self.with_runtime::<(), _, _>(|mut runtime| {
+            let mut reg = self.clone();
+            runtime.register_object(self.obj_id,
+                                    Box::new(move |_, op: Operation| reg.callback(op)));
+        });
     }
 
     pub fn read(&mut self) -> i32 {
-        match self.runtime {
-            Some(ref runtime) => {
-                runtime.lock().unwrap().sync(Some(self.obj_id));
-                return self.data.lock().unwrap().clone();
-            }
-            None => panic!("invalid runtime"),
-        }
+        self.with_runtime::<i32, _, _>(|mut runtime| {
+            runtime.sync(Some(self.obj_id));
+            self.data.lock().unwrap().clone()
+        })
     }
 
     pub fn write(&mut self, val: i32) {
-        match self.runtime {
-            Some(ref runtime) => {
-                let mut runtime = runtime.lock().unwrap();
-                let op = RegisterOp::Write { data: val };
-                runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
-            }
-            None => panic!("invalid runtime"),
-        }
+        self.with_runtime::<(), _, _>(|mut runtime| {
+            let op = RegisterOp::Write { data: val };
+            runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
+        });
     }
 
     pub fn callback(&mut self, op: Operation) {
@@ -148,8 +150,8 @@ impl<K, V, Q, S> Decodable for BTMap<K, V, Q, S>
 {
     fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
         let data = try!(Decodable::decode(d));
-        let reg: BTMap<K, V, Q, S> = BTMap::default(data);
-        let res: Result<Self, D::Error> = Ok(reg);
+        let btmap: BTMap<K, V, Q, S> = BTMap::default(data);
+        let res: Result<Self, D::Error> = Ok(btmap);
         return res;
     }
 }
@@ -192,32 +194,38 @@ impl<K, V, Q, Secure> BTMap<K, V, Q, Secure>
           Q: 'static + IndexedQueue + Send + Clone,
           Secure: 'static + Encryptor + Send + Clone
 {
-    // TODO: this is exactly the fn for Register (investigate collapse)
-    pub fn start(&mut self) {
+    fn with_runtime<R, T, F>(&self, f: F) -> T
+        where F: FnOnce(MutexGuard<Runtime<Q, Secure>>) -> T
+    {
         assert!(self.runtime.is_some(), "invalid runtime");
-        self.runtime.as_ref().map(|runtime| {
-            let mut runtime = runtime.lock().unwrap();
+        self.runtime
+            .as_ref()
+            .map(|runtime| {
+                let runtime = runtime.lock().unwrap();
+                f(runtime)
+            })
+            .unwrap()
+    }
+
+    pub fn start(&mut self) {
+        self.with_runtime::<(), _, _>(|mut runtime| {
             let mut obj = self.clone();
             runtime.register_object(self.obj_id,
                                     Box::new(move |_, op: Operation| obj.callback(op)));
+
         });
     }
 
     pub fn get(&self, k: &K) -> Option<V> {
-        match self.runtime {
-            Some(ref runtime) => {
-                runtime.lock().unwrap().sync(Some(self.obj_id));
-                let data = self.data.lock().unwrap();
-                return data.get(k).cloned();
-            }
-            None => panic!("invalid runtime"),
-        };
+        self.with_runtime::<V, _, _>(|mut runtime| {
+            runtime.sync(Some(self.obj_id));
+            let data = self.data.lock().unwrap();
+            data.get(k).cloned()
+        })
     }
 
     pub fn insert(&mut self, k: K, v: V) {
-        assert!(self.runtime.is_some(), "invalid runtime");
-        self.runtime.as_ref().map(|runtime| {
-            let mut runtime = runtime.lock().unwrap();
+        self.with_runtime::<(), _, _>(|mut runtime| {
             let op = BTMapOp::Insert { key: k, val: v };
             runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
         });
@@ -248,6 +256,7 @@ impl<K, V, Q, Secure> BTMap<K, V, Q, Secure>
 #[cfg(test)]
 mod test {
     use std::collections::BTreeMap;
+    use std::char;
     use super::{Register, BTMap};
     use runtime::{Runtime, Identity};
     use indexed_queue::{InMemoryQueue, SharedQueue, ObjId};
@@ -278,7 +287,6 @@ mod test {
         }
     }
 
-    use std::char;
     #[test]
     fn btmap_read_write() {
         let q = InMemoryQueue::new();
@@ -296,13 +304,11 @@ mod test {
             assert_eq!(val, btmap.get(&key).unwrap());
         }
 
-        match btmap.runtime {
-            Some(ref runtime) => {
-                assert_eq!(runtime.lock().unwrap().global_idx, n - 1);
-            }
-            None => panic!("invalid runtime"),
-        }
 
+        assert!(btmap.runtime.is_some(), "invalid runtime");
+        btmap.runtime.map(|runtime| {
+            assert_eq!(runtime.lock().unwrap().global_idx, n - 1);
+        });
     }
 
     #[test]

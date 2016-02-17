@@ -9,7 +9,7 @@ use self::hyper::Server;
 use self::hyper::net::Fresh;
 use self::hyper::server::{Handler, Request, Response, Listening};
 
-use indexed_queue::{IndexedQueue, LogIndex, Entry, LogData};
+use indexed_queue::{IndexedQueue, LogData};
 use http_data::{HttpRequest, HttpResponse};
 
 pub struct HttpServer<Q: 'static> {
