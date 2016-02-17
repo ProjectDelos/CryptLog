@@ -326,7 +326,7 @@ impl IndexedQueue for DynamoQueue {
                     if !contains {
                         continue;
                     }
-                    let mut entry : Entry = json::decode(&data).unwrap();
+                    let mut entry: Entry = json::decode(&data).unwrap();
                     entry.idx = Some(from);
                     println!("entry: {:?}", entry);
                     tx.send(LogEntry(entry)).unwrap();
@@ -450,6 +450,7 @@ mod test {
     use super::LogData::LogEntry;
     use std::thread;
     use std::sync::mpsc;
+    use std::time::Duration;
 
     use http_server::HttpServer;
     enum ThreadMssg {
@@ -544,6 +545,8 @@ mod test {
             }
 
         });
+        // give server the chance to start
+        thread::sleep(Duration::from_millis(50));
 
         // client sends over some work via append
         let n = 5;

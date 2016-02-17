@@ -8,6 +8,7 @@ use self::rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
 use runtime::{Runtime, Encryptor};
 use indexed_queue::{Operation, IndexedQueue, State, LogOp};
 use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
 
 #[derive(Clone)]
 pub struct Register<Q, Secure> {
@@ -44,9 +45,9 @@ pub enum RegisterOp {
 //      Secure: Encryptor + Send + Clone
 impl<Q, Secure> Register<Q, Secure> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q, Secure>>>,
-           obj_id: i32,
-           data: i32)
-           -> Register<Q, Secure> {
+               obj_id: i32,
+               data: i32)
+               -> Register<Q, Secure> {
         let reg = Register {
             obj_id: obj_id,
             runtime: Some(aruntime.clone()),
@@ -63,6 +64,7 @@ impl<Q, Secure> Register<Q, Secure> {
         }
     }
 }
+
 
 impl<Q, Secure> Register<Q, Secure>
     where Q: 'static + IndexedQueue + Send + Clone,
@@ -124,15 +126,135 @@ impl<Q, Secure> Register<Q, Secure>
     }
 }
 
+#[derive(Clone)]
+pub struct BTMap<K, V, Q, Secure> {
+    runtime: Option<Arc<Mutex<Runtime<Q, Secure>>>>,
+    obj_id: i32,
+
+    pub data: Arc<Mutex<BTreeMap<K, V>>>,
+}
+
+#[derive(RustcEncodable, RustcDecodable, Debug)]
+pub enum BTMapOp<K, V> {
+    Insert {
+        key: K,
+        val: V,
+    },
+}
+
+impl<K, V, Q, S> Decodable for BTMap<K, V, Q, S>
+    where K: Encodable + Decodable + Ord,
+          V: Encodable + Decodable
+{
+    fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
+        let data = try!(Decodable::decode(d));
+        let reg: BTMap<K, V, Q, S> = BTMap::default(data);
+        let res: Result<Self, D::Error> = Ok(reg);
+        return res;
+    }
+}
+
+impl<K, V, Q, Secure> Encodable for BTMap<K, V, Q, Secure>
+    where K: Encodable + Decodable + Ord,
+          V: Encodable + Decodable
+{
+    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
+        let data = self.data.lock().unwrap();
+        data.encode(s)
+    }
+}
+
+impl<K, V, Q, Secure> BTMap<K, V, Q, Secure> {
+    pub fn new(aruntime: &Arc<Mutex<Runtime<Q, Secure>>>,
+               obj_id: i32,
+               data: BTreeMap<K, V>)
+               -> BTMap<K, V, Q, Secure> {
+        let btmap = BTMap {
+            obj_id: obj_id,
+            runtime: Some(aruntime.clone()),
+            data: Arc::new(Mutex::new(data)),
+        };
+        return btmap;
+    }
+
+    fn default(data: BTreeMap<K, V>) -> BTMap<K, V, Q, Secure> {
+        BTMap {
+            obj_id: 0,
+            data: Arc::new(Mutex::new(data)),
+            runtime: None,
+        }
+    }
+}
+
+impl<K, V, Q, Secure> BTMap<K, V, Q, Secure>
+    where K: 'static + Ord + Send + Clone + Encodable + Decodable,
+          V: 'static + Ord + Send + Clone + Encodable + Decodable,
+          Q: 'static + IndexedQueue + Send + Clone,
+          Secure: 'static + Encryptor + Send + Clone
+{
+    // TODO: this is exactly the fn for Register (investigate collapse)
+    pub fn start(&mut self) {
+        assert!(self.runtime.is_some(), "invalid runtime");
+        self.runtime.as_ref().map(|runtime| {
+            let mut runtime = runtime.lock().unwrap();
+            let mut obj = self.clone();
+            runtime.register_object(self.obj_id,
+                                    Box::new(move |_, op: Operation| obj.callback(op)));
+        });
+    }
+
+    pub fn get(&self, k: &K) -> Option<V> {
+        match self.runtime {
+            Some(ref runtime) => {
+                runtime.lock().unwrap().sync(Some(self.obj_id));
+                let data = self.data.lock().unwrap();
+                return data.get(k).cloned();
+            }
+            None => panic!("invalid runtime"),
+        };
+    }
+
+    pub fn insert(&mut self, k: K, v: V) {
+        assert!(self.runtime.is_some(), "invalid runtime");
+        self.runtime.as_ref().map(|runtime| {
+            let mut runtime = runtime.lock().unwrap();
+            let op = BTMapOp::Insert { key: k, val: v };
+            runtime.append(self.obj_id, State::Encoded(json::encode(&op).unwrap()));
+        });
+    }
+
+    pub fn callback(&mut self, op: Operation) {
+        match op.operator {
+            LogOp::Op(State::Encoded(ref s)) => {
+                let op = json::decode(&s).unwrap();
+                match op {
+                    BTMapOp::Insert{key: k, val: v} => {
+                        let mut m_data = self.data.lock().unwrap();
+                        m_data.insert(k, v);
+                    }
+                }
+            }
+            LogOp::Snapshot(State::Encoded(ref s)) => {
+                let obj = json::decode(&s).unwrap();
+                *self = obj;
+            }
+            _ => {
+                unimplemented!();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeMap;
+    use super::{Register, BTMap};
     use runtime::{Runtime, Identity};
     use indexed_queue::{InMemoryQueue, SharedQueue, ObjId};
-    use super::Register;
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn read_write_register() {
+    fn register_read_write() {
         let q = InMemoryQueue::new();
         let runtime: Runtime<InMemoryQueue, Identity> = Runtime::new(q);
         let aruntime = Arc::new(Mutex::new(runtime));
@@ -154,6 +276,33 @@ mod test {
             }
             None => panic!("invalid runtime"),
         }
+    }
+
+    use std::char;
+    #[test]
+    fn btmap_read_write() {
+        let q = InMemoryQueue::new();
+        let runtime: Runtime<InMemoryQueue, Identity> = Runtime::new(q);
+        let aruntime = Arc::new(Mutex::new(runtime));
+        let n = 5;
+        let obj_id = 1;
+        let mut btmap = BTMap::new(&aruntime, obj_id, BTreeMap::new());
+        btmap.start();
+
+        for key in 0..n {
+            let mut val = String::from("hello_");
+            val.push(char::from_u32(key as u32).unwrap());
+            btmap.insert(key, val.clone());
+            assert_eq!(val, btmap.get(&key).unwrap());
+        }
+
+        match btmap.runtime {
+            Some(ref runtime) => {
+                assert_eq!(runtime.lock().unwrap().global_idx, n - 1);
+            }
+            None => panic!("invalid runtime"),
+        }
+
     }
 
     #[test]

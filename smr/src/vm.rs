@@ -411,12 +411,13 @@ impl<Q, Secure, Skip, Snap> Drop for VM<Q, Secure, Skip, Snap>
 
 #[cfg(test)]
 mod test {
-    use super::*;
     extern crate rustc_serialize;
     use self::rustc_serialize::json;
+    use super::{VM, Skiplist, MapSkiplist, Snapshotter, AsyncSnapshotter};
+    // use super::*;
 
     use indexed_queue::{SharedQueue, IndexedQueue, ObjId, Operation, LogOp, State};
-    use indexed_queue::LogData::{LogEntry};
+    use indexed_queue::LogData::LogEntry;
     use indexed_queue::State::Encoded;
     use runtime::{Identity, Runtime};
     use ds::{Register, RegisterOp};
@@ -476,7 +477,7 @@ mod test {
                     let reg: Register<SharedQueue, Identity> = json::decode(&s).unwrap();
                     let data = reg.data.lock().unwrap();
                     assert_eq!(*data, 9);
-                },
+                }
                 _ => panic!("should never be encrypted in this test"),
             }
         }
@@ -555,7 +556,7 @@ mod test {
                 LogEntry(e) => {
                     assert_eq!(i + 100, e.idx.unwrap());
                     i += 1;
-                },
+                }
                 _ => panic!("should only be one snapshot"),
             }
         }
