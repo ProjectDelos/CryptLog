@@ -51,7 +51,7 @@ pub struct Runtime<Q, Secure> {
     reads: HashMap<ObjId, LogIndex>,
     writes: HashSet<ObjId>,
     operations: Vec<Operation>,
-    tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
+    pub tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
 }
 
 impl<Q, Secure> Runtime<Q, Secure>
@@ -94,14 +94,17 @@ impl<Q, Secure> Runtime<Q, Secure>
         self.sync(None);
     }
 
-    pub fn end_tx(&mut self) {
-        self.iq.append(Entry::new(self.reads.drain().collect(),
-                                  self.writes.drain().collect(),
-                                  self.operations.drain(..).collect(),
-                                  TxType::End,
-                                  TxState::None));
+    pub fn end_tx(&mut self) -> TxState {
+        let tx_idx = self.iq.append(Entry::new(self.reads.drain().collect(),
+                                               self.writes.drain().collect(),
+                                               self.operations.drain(..).collect(),
+                                               TxType::End,
+                                               TxState::None));
         self.tx_mode = false;
-        // TODO: wait for tx validation and return ok or err
+        self.reads.clear();
+        self.writes.clear();
+        self.operations.clear();
+        return self.internal_sync(None, Some(tx_idx));
     }
 
     pub fn validate_tx(&mut self, e: &mut Entry) {
@@ -122,15 +125,18 @@ impl<Q, Secure> Runtime<Q, Secure>
         }
     }
 
-
     pub fn sync(&mut self, obj_id: Option<ObjId>) {
+        self.internal_sync(obj_id, None);
+    }
+
+    pub fn internal_sync(&mut self, obj_id: Option<ObjId>, tx_idx: Option<LogIndex>) -> TxState {
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
         // for tx, only record read
         if obj_id.is_some() {
             if self.tx_mode {
                 let obj_id = obj_id.unwrap();
                 self.reads.insert(obj_id, self.version[&obj_id]);
-                return;
+                return TxState::None;
             }
 
         }
@@ -141,19 +147,35 @@ impl<Q, Secure> Runtime<Q, Secure>
         loop {
             match rx.recv() {
                 Ok(LogEntry(mut e)) => {
+                    let e_idx = e.idx.clone().unwrap();
+                    assert_eq!(e_idx, self.global_idx + 1);
+                    self.global_idx = e_idx.clone() as LogIndex;
+
                     // replicate entries to entry_callbacks
                     for cb in self.entry_callbacks.iter_mut() {
                         let e = e.clone();
                         cb(e);
                     }
-
                     self.validate_tx(&mut e);
+
+                    // see if entry has idx user is waiting on
+                    let same_idx = match tx_idx {
+                        Some(tx_idx) => tx_idx == e_idx,
+                        None => false,
+                    };
+
+                    // no callback updates needed if tx was aborted
                     if e.tx_state == TxState::Aborted {
+                        if same_idx {
+                            return TxState::Aborted;
+                        }
                         continue;
                     }
-                    let idx = e.idx.clone().unwrap();
 
                     for op in &e.operations {
+                        // every operation is a write of sorts
+                        *(self.version.get_mut(&op.obj_id).unwrap()) += 1;
+
                         if !self.obj_ids.contains(&op.obj_id) {
                             // entry also has operation on object not tracked
                             continue;
@@ -166,7 +188,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                                 let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
                                 let dec_operator = Secure::decrypt(operator.clone());
                                 for c in callbacks.iter_mut() {
-                                    c(idx, Operation::new(obj_id, dec_operator.clone()));
+                                    c(e_idx, Operation::new(obj_id, dec_operator.clone()));
                                 }
 
                             }
@@ -176,10 +198,14 @@ impl<Q, Secure> Runtime<Q, Secure>
                         }
                     }
 
-                    assert_eq!(idx, self.global_idx + 1);
-                    self.global_idx = idx as LogIndex;
+                    if same_idx {
+                        return e.tx_state.clone();
+                    }
                 }
                 Ok(LogSnapshot(s)) => {
+                    assert_eq!(s.idx, self.global_idx + 1);
+                    self.global_idx = s.idx as LogIndex;
+
                     if !self.obj_ids.contains(&s.obj_id) {
                         continue;
                     }
@@ -195,6 +221,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                 Err(_) => break,
             };
         }
+        return TxState::None;
     }
 
     pub fn catch_up(&mut self, obj_id: ObjId, mut c: &mut Box<Callback>) {

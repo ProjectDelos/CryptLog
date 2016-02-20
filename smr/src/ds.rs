@@ -117,6 +117,7 @@ impl<Q, Secure> Register<Q, Secure>
                     }
                 }
             }
+            // could get TX succeeded, mark the variable
             LogOp::Snapshot(State::Encoded(ref s)) => {
                 let reg = json::decode(&s).unwrap();
                 *self = reg;
@@ -259,7 +260,7 @@ mod test {
     use std::char;
     use super::{Register, BTMap};
     use runtime::{Runtime, Identity};
-    use indexed_queue::{InMemoryQueue, SharedQueue, ObjId};
+    use indexed_queue::{InMemoryQueue, SharedQueue, ObjId, TxState};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -312,22 +313,31 @@ mod test {
     }
 
     #[test]
-    fn multiple_clients() {
+    fn multiple_objects() {
         let q = SharedQueue::new();
         let runtime: Runtime<SharedQueue, Identity> = Runtime::new(q);
         let aruntime = Arc::new(Mutex::new(runtime));
 
         let mut reg1 = Register::new(&aruntime, 1 as ObjId, 1);
         let mut reg2 = Register::new(&aruntime, 2 as ObjId, 2);
+        let mut btmap = BTMap::new(&aruntime, 3 as ObjId, BTreeMap::new());
         reg1.start();
         reg2.start();
+        btmap.start();
 
         // reg1: 1 + 2 + 3 + 2 + 3
         // reg2: 2^5
-        for _ in 1..3 {
+        // btmap[1] = 1 * 10 + 2 + 3 = 15
+        // btmap[2] = 2 * 10 + 2 + 3 = 25
+        for turn in 1..3 {
             for i in 2..4 {
                 let x = reg1.read();
                 reg1.write(x + i)
+            }
+
+            for i in 2..4 {
+                let val = btmap.get(&turn);
+                btmap.insert(turn, val.unwrap_or(turn * 10) + i);
             }
 
             for _ in 2..4 {
@@ -336,19 +346,26 @@ mod test {
             }
         }
 
+        // check register values correctly read in new views
         let mut reg1b = Register::new(&aruntime, 1 as ObjId, 10);
         reg1b.start();
         let mut reg2b = Register::new(&aruntime, 2 as ObjId, 20);
         reg2b.start();
         assert_eq!(reg1b.read(), 11);
         assert_eq!(reg2b.read(), 32);
+        // check btmap values correctly read in new view
+        let mut btmapb: BTMap<i32, i32, _, _> = BTMap::new(&aruntime, 3 as ObjId, BTreeMap::new());
+        btmapb.start();
+        assert_eq!(btmapb.get(&1).unwrap(), 15);
+        assert_eq!(btmapb.get(&2).unwrap(), 25);
 
+        // check writing to same object via different register view
         reg1b.write(100);
         assert_eq!(reg1.read(), 100);
     }
 
     #[test]
-    fn transaction() {
+    fn transaction_accepted() {
         let q = SharedQueue::new();
         let runtime: Runtime<SharedQueue, Identity> = Runtime::new(q);
         let aruntime = Arc::new(Mutex::new(runtime));
@@ -369,8 +386,57 @@ mod test {
         reg3.write(x + y + 1);
         {
             let mut runtime = aruntime.lock().unwrap();
-            runtime.end_tx();
+            let tx_state = runtime.end_tx();
+            assert_eq!(tx_state, TxState::Accepted);
         }
         assert_eq!(reg3.read(), 31);
+    }
+
+    #[test]
+    fn transaction_aborted() {
+        let q = SharedQueue::new();
+        // 2 runtimes sharing the same q
+        let runtime: Runtime<SharedQueue, Identity> = Runtime::new(q.clone());
+        let aruntime = Arc::new(Mutex::new(runtime));
+        let runtime_2: Runtime<SharedQueue, Identity> = Runtime::new(q);
+        let aruntime_2 = Arc::new(Mutex::new(runtime_2));
+
+        // start user1
+        let mut user1_reg1 = Register::new(&aruntime, 1 as ObjId, 10);
+        let mut user1_reg2 = Register::new(&aruntime, 2 as ObjId, 20);
+        user1_reg1.start();
+        user1_reg2.start();
+        // start user 2
+        let mut user2_reg1 = Register::new(&aruntime_2, 1 as ObjId, 10);
+        let mut user2_reg2 = Register::new(&aruntime_2, 2 as ObjId, 20);
+        user2_reg1.start();
+        user2_reg2.start();
+
+        // user 1 starts transaction
+        {
+            {
+                let mut runtime = aruntime.lock().unwrap();
+                runtime.begin_tx();
+            }
+            let x = user1_reg1.read();
+            user1_reg2.write(x + 1);
+        }
+
+        // user 2 invalidates user 1's transaction
+        {
+            user2_reg1.write(1000);
+        }
+
+        // user1 checks transaction
+        {
+            let mut runtime = aruntime.lock().unwrap();
+            let tx_state = runtime.end_tx();
+            assert_eq!(tx_state, TxState::Aborted);
+        }
+
+        assert_eq!(user1_reg1.read(), 1000);
+        assert_eq!(user2_reg1.read(), 1000);
+        assert_eq!(user1_reg2.read(), 20);
+        assert_eq!(user2_reg2.read(), 20);
     }
 }
