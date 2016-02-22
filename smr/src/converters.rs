@@ -63,12 +63,11 @@ impl<I> AddableConverter<I> {
 #[cfg(test)]
 mod test {
     use super::{ConvertersLib, AddableConverter};
-    use std::sync::Arc;
 
     #[test]
     fn create_addable_converter() {
-        let ac = AddableConverter::new(ConvertersLib::i32_from_addable(),
-                                       ConvertersLib::addable_from_i32());
+        let _ = AddableConverter::new(ConvertersLib::i32_from_addable(),
+                                      ConvertersLib::addable_from_i32());
 
     }
 }

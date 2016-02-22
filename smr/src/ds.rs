@@ -52,9 +52,9 @@ impl<Q> AddableRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
 pub struct Register<Q, I> {
     runtime: Option<Arc<Mutex<Runtime<Q>>>>,
     obj_id: i32,
-    convert: Option<AddableConverter<I>>,
-
     pub data: Arc<Mutex<I>>,
+
+    convert: Option<AddableConverter<I>>,
     secure: Option<MetaEncryptor>,
 }
 
@@ -143,12 +143,11 @@ impl<Q, I> Register<Q, I>
 
     pub fn write(&mut self, val: I) {
         self.with_runtime::<(), _, _>(|mut runtime| {
-            let secure = &self.secure;
             let data: Addable = self.convert
                                     .as_ref()
                                     .map(|convert| {
                                         let to = &convert.to;
-                                        to(secure, val)
+                                        to(&self.secure, val)
                                     })
                                     .unwrap();
 
@@ -159,12 +158,11 @@ impl<Q, I> Register<Q, I>
     }
 
     pub fn get_data(&self, data: Addable) -> I {
-        let secure = &self.secure;
         self.convert
             .as_ref()
             .map(|convert| {
                 let from = &convert.from;
-                from(secure, data)
+                from(&self.secure, data)
             })
             .unwrap()
     }
@@ -302,7 +300,6 @@ impl<K, V, Q> BTMap<K, V, Q>
 
     pub fn insert(&mut self, k: K, v: V) {
         self.with_runtime::<(), _, _>(|mut runtime| {
-            // let op = BTMapOp::Insert { key: k, val: v };
             let encrypted_op = BTMapOp::Insert {
                 key: MetaEncryptor::encrypt_ident(k),
                 val: MetaEncryptor::encrypt_ident(v),

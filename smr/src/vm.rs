@@ -415,8 +415,8 @@ mod test {
     use indexed_queue::LogData::LogEntry;
     use indexed_queue::State::Encoded;
     use runtime::Runtime;
-    use ds::{Register, RegisterOp, IntRegister, AddableRegister};
-    use encryptors::{MetaEncryptor, Addable, Int, AddEncryptor, EqEncryptor, Encryptor};
+    use ds::{RegisterOp, IntRegister, AddableRegister};
+    use encryptors::{MetaEncryptor, Addable, AddEncryptor, EqEncryptor, Encryptor};
 
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
