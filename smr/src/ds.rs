@@ -12,6 +12,7 @@ use converters::{ConvertersLib, AddableConverter};
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::collections::BTreeMap;
+use std::ops::Add;
 
 pub type IntRegister<Q> = Register<Q, i32>;
 
@@ -80,6 +81,9 @@ pub enum RegisterOp<T> {
     Write {
         data: T,
     },
+    Inc {
+        add: T
+    },
 }
 
 impl<Q, I> Register<Q, I> {
@@ -111,7 +115,7 @@ impl<Q, I> Register<Q, I> {
 
 impl<Q, I> Register<Q, I>
     where Q: 'static + IndexedQueue + Send + Clone,
-          I: 'static + Encodable + Decodable + Send + Clone
+          I: 'static + Encodable + Decodable + Send + Clone + Add<Output=I>
 {
     fn with_runtime<R, T, F>(&self, f: F) -> T
         where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
@@ -157,6 +161,21 @@ impl<Q, I> Register<Q, I>
         });
     }
 
+    pub fn inc(&mut self, val: I) {
+        self.with_runtime::<(), _, _>(|mut runtime| {
+            let data: Addable = self.convert
+                .as_ref()
+                .map(|convert| {
+                    let to = &convert.to;
+                    to(&self.secure, val)
+                }).unwrap();
+
+            let encrypted_op = RegisterOp::Inc { add: data };
+            let op = json::encode(&encrypted_op).unwrap();
+            runtime.append(self.obj_id, State::Encrypted(op.into_bytes()));
+        });
+    }
+
     pub fn get_data(&self, data: Addable) -> I {
         self.convert
             .as_ref()
@@ -177,6 +196,11 @@ impl<Q, I> Register<Q, I>
                         let data = self.get_data(data);
                         let mut m_data = self.data.lock().unwrap();
                         *m_data = data;
+                    },
+                    RegisterOp::Inc{add} => {
+                        let add = self.get_data(add);
+                        let mut m_data = self.data.lock().unwrap();
+                        *m_data = m_data.clone() + add;
                     }
                 }
             }
@@ -186,15 +210,18 @@ impl<Q, I> Register<Q, I>
                     RegisterOp::Write{data} => {
                         let mut m_data = self.data.lock().unwrap();
                         *m_data = data;
+                    },
+                    RegisterOp::Inc{add} => {
+                        let mut m_data = self.data.lock().unwrap();
+                        *m_data = m_data.clone() + add;
                     }
                 }
             }
             // could get TX succeeded, mark the variable
             LogOp::Snapshot(State::Encoded(ref s)) => {
-                let mut reg: Register<Q, I> = json::decode(&s).unwrap();
-                reg.convert = self.convert.clone();
-                reg.runtime = self.runtime.clone();
-                *self = reg;
+                let enc_reg: Register<Q, Addable> = json::decode(&s).unwrap();
+                let mut data = self.data.lock().unwrap();
+                *data = self.get_data(enc_reg.data.lock().unwrap().clone());
             }
             _ => {
                 unimplemented!();

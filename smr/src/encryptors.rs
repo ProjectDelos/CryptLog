@@ -176,9 +176,9 @@ impl Encryptor {
 
 #[derive(Clone)]
 pub struct MetaEncryptor {
-    eq: EqEncryptor,
-    add: AddEncryptor,
-    enc: Encryptor,
+    pub eq: EqEncryptor,
+    pub add: AddEncryptor,
+    pub enc: Encryptor,
 }
 
 impl MetaEncryptor {

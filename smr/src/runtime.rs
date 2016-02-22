@@ -122,14 +122,8 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
             match rx.recv() {
                 Ok(LogEntry(mut e)) => {
                     let e_idx = e.idx.clone().unwrap();
-                    assert_eq!(e_idx, self.global_idx + 1);
                     self.global_idx = e_idx.clone() as LogIndex;
 
-                    // replicate entries to entry_callbacks
-                    for cb in self.entry_callbacks.iter_mut() {
-                        let e = e.clone();
-                        cb(e);
-                    }
                     self.validate_tx(&mut e);
 
                     // see if entry has idx user is waiting on
@@ -171,13 +165,18 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                             }
                         }
                     }
+                    // replicate entries to entry_callbacks
+                    for cb in self.entry_callbacks.iter_mut() {
+                        let e = e.clone();
+                        cb(e);
+                    }
+
 
                     if same_idx {
                         return e.tx_state.clone();
                     }
                 }
                 Ok(LogSnapshot(s)) => {
-                    assert_eq!(s.idx, self.global_idx + 1);
                     self.global_idx = s.idx as LogIndex;
 
                     if !self.obj_ids.contains(&s.obj_id) {
@@ -190,7 +189,6 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                     for c in callbacks.iter_mut() {
                         c(idx, Operation::from_snapshot(obj_id, snapshot.clone()));
                     }
-                    unimplemented!();
                 }
                 Err(_) => break,
             };

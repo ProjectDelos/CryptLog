@@ -136,7 +136,6 @@ impl Snapshotter for AsyncSnapshotter {
                                                       obj_id: ObjId,
                                                       mut callback: Box<Callback>,
                                                       obj: T) {
-
         let (obj_chan_tx, obj_chan_rx) = chan::async();
         self.obj_chan.insert(obj_id, obj_chan_tx);
         let snapshots_tx = self.snapshots_tx.clone();
@@ -236,16 +235,17 @@ impl Drop for AsyncSnapshotter {
 // Responsibilities:
 //   Snapshotting: keep track of all objects and object ids
 //   Streaming: Keep track of skip list of entries for all objects
+#[derive(Clone)]
 pub struct VM<Q: IndexedQueue + Send,
               Skip: Skiplist + Clone + Send,
               Snap: Snapshotter + Clone + Send>
 {
-    runtime: Arc<Mutex<Runtime<Q>>>,
+    pub runtime: Arc<Mutex<Runtime<Q>>>,
     obj_id: Vec<ObjId>,
     local_queue: Arc<Mutex<HashMap<LogIndex, Entry>>>,
     skiplist: Arc<Mutex<Skip>>,
     snapshots: Arc<Mutex<Snap>>,
-    threads: Vec<JoinHandle<()>>,
+    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stop: Arc<AtomicBool>,
     queue: Q,
 }
@@ -263,7 +263,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             local_queue: Arc::new(Mutex::new(HashMap::new())),
             skiplist: Arc::new(Mutex::new(skiplist)),
             snapshots: Arc::new(Mutex::new(snapshotter)),
-            threads: Vec::new(),
+            threads: Arc::new(Mutex::new(Vec::new())),
             stop: Arc::new(AtomicBool::new(false)),
             queue: queue,
         };
@@ -274,7 +274,6 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
     pub fn start(&mut self) {
         // Start constructing skip list.
         // Skip list stores all indices in the log for each entry.
-        // TODO: Should be garbage collected occasionally after snapshotting.
         let seen = Box::new(Arc::new(AtomicUsize::new(0)));
         {
             let snapshotter = self.snapshots.clone();
@@ -282,17 +281,17 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             let seen = seen.clone();
             let local_queue = self.local_queue.clone();
             let vm_callback = Box::new(move |entry: Entry| {
+                // Lock the local_queue to ensure serialization here
+                let mut local_queue = local_queue.lock().unwrap();
                 let seen = seen.fetch_add(1, SeqCst);
                 let idx = entry.idx.unwrap();
-                {
-                    // Add this entry to the local queue
-                    local_queue.lock().unwrap().insert(idx, entry);
-                }
+
+                // Add this entry to the local queue
+                local_queue.insert(idx, entry);
                 // Every once in a while take snapshots of all objects and gc
                 if (seen + 1) % 100 == 0 {
                     snapshotter.lock().unwrap().snapshot(idx);
                     // gc local queue
-                    let mut local_queue = local_queue.lock().unwrap();
                     let mut new_queue = HashMap::new();
                     for (i, entry) in local_queue.drain() {
                         if i >= idx {
@@ -314,7 +313,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
         // sync all of the objects
         let runtime = self.runtime.clone();
         let stop = self.stop.clone();
-        self.threads.push(thread::spawn(move || {
+        self.threads.lock().unwrap().push(thread::spawn(move || {
             loop {
                 if stop.load(Acquire) {
                     return;
@@ -344,6 +343,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             // Add this index to the skiplist
             skiplist.lock().unwrap().append(obj_id, idx);
             // Execute this entry on the snapshotter for this object
+
             snapshotter.lock().unwrap().exec(obj_id, idx, op.clone());
         });
         self.runtime.lock().unwrap().register_object(obj_id, cb);
@@ -398,7 +398,8 @@ impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
     fn drop(&mut self) {
         // Tell thread poller to stop and collect threads
         self.stop.store(true, Release);
-        for t in self.threads.drain(..) {
+        let mut threads = self.threads.lock().unwrap();
+        for t in threads.drain(..) {
             t.join().unwrap();
         }
         // Snapshotter stops on drop snapshotter
@@ -451,12 +452,14 @@ mod test {
         let q = SharedQueue::new();
         let mut snapshotter = AsyncSnapshotter::new();
         let runtime: Arc<Mutex<Runtime<SharedQueue>>> = Arc::new(Mutex::new(Runtime::new(q, None)));
-        let reg = IntRegister::new(&runtime, 0, -1);
+        let reg = IntRegister::new(&runtime, 0, 0);
         let mut reg2 = reg.clone();
+        let n = 250;
+
         snapshotter.register_object(0, Box::new(move |_, e| reg2.callback(e)), reg);
         snapshotter.start();
-        for i in 0..10 {
-            let reg_op = RegisterOp::Write { data: i };
+        for _ in 0..n {
+            let reg_op = RegisterOp::Inc { add: 2 };
             snapshotter.exec(0,
                              0,
                              Operation {
@@ -464,15 +467,15 @@ mod test {
                                  operator: LogOp::Op(State::Encoded(json::encode(&reg_op).unwrap())),
                              });
         }
-        snapshotter.snapshot(10);
+        snapshotter.snapshot(n);
         let snaps = snapshotter.get_snapshots(&[0].iter().cloned().collect());
         for (_, s) in snaps {
-            assert_eq!(s.idx, 10);
+            assert_eq!(s.idx, n);
             match s.payload {
                 Encoded(s) => {
                     let reg: IntRegister<SharedQueue> = json::decode(&s).unwrap();
                     let data = reg.data.lock().unwrap();
-                    assert_eq!(*data, 9);
+                    assert_eq!(*data, (n * 2) as i32);
                 }
                 _ => panic!("should never be encrypted in this test"),
             }
@@ -504,9 +507,6 @@ mod test {
             client_reg.write(i);
         }
 
-        // TODO: do we want to be able to read our own writes? probably...
-        // assert_eq!(reg.read(), 9);
-
         vm.runtime.lock().unwrap().sync(Some(obj_id));
         let mut i = 0;
         let entries = vm.stream(&[obj_id].iter().cloned().collect(), 0, None);
@@ -524,8 +524,7 @@ mod test {
     #[test]
     fn vm_full() {
         let q = SharedQueue::new();
-        let mut vm: VM<SharedQueue, MapSkiplist, AsyncSnapshotter> =
-            VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
+        let mut vm = VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
 
         let add_encryptor = AddEncryptor::new();
         // VM does snapshotting in reg, decrypting not needed
@@ -545,8 +544,7 @@ mod test {
             reg.write(i);
         }
 
-        // TODO: do we want to be able to read our own writes? probably...
-        // assert_eq!(reg.read(), 9);
+        assert_eq!(reg.read(), 149);
 
 
         vm.runtime.lock().unwrap().sync(Some(0));
