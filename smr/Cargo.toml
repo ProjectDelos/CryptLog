@@ -11,7 +11,7 @@ chan = "0.1.14"
 serde = "*"
 serde_json = "*"
 serde_macros = "*"
-rpaillier = { git = "https://github.com/kunerd/rpaillier.git" }
+rpaillier = { git = "https://github.com/iuliatamas/rpaillier.git" }
 ramp = "0.2.2"
 rand = "^0.3"
 openssl = "0.7.6"

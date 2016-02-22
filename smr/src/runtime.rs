@@ -1,45 +1,17 @@
 extern crate rustc_serialize;
 
-// use self::rustc_serialize::json;
-use std::marker::PhantomData;
-
 use std::collections::{HashMap, HashSet};
 use indexed_queue::{IndexedQueue, Entry, ObjId, State, Operation, TxType, TxState, LogIndex, LogOp};
+use encryptors::MetaEncryptor;
 
 pub type Callback = FnMut(LogIndex, Operation) + Send;
 pub type EntryCallback = FnMut(Entry) + Send;
 
-pub trait Encryptor {
-    fn encrypt(s: State) -> State;
-    fn decrypt(s: State) -> State;
-}
+// State::Encoded(s) => State::Encrypted(s.into_bytes()),
+// State::Encrypted(v) => State::Encoded(String::from_utf8(v).unwrap()),
 
-#[derive(Clone)]
-pub struct Identity;
-impl Identity {
-    pub fn new() -> Identity {
-        return Identity;
-    }
-}
-impl Encryptor for Identity {
-    fn encrypt(state: State) -> State {
-        return match state {
-            State::Encoded(s) => State::Encrypted(s.into_bytes()),
-            State::Encrypted(_) => panic!("already encrypted"), 
-        };
-    }
-
-    fn decrypt(state: State) -> State {
-        return match state {
-            State::Encoded(_) => panic!("already decrypted"),
-            State::Encrypted(v) => State::Encoded(String::from_utf8(v).unwrap()),
-        };
-    }
-}
-
-pub struct Runtime<Q, Secure> {
+pub struct Runtime<Q> {
     iq: Q,
-    e: PhantomData<Secure>,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
     entry_callbacks: Vec<Box<EntryCallback>>,
@@ -52,16 +24,15 @@ pub struct Runtime<Q, Secure> {
     writes: HashSet<ObjId>,
     operations: Vec<Operation>,
     pub tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
+
+    pub secure: Option<MetaEncryptor>,
 }
 
-impl<Q, Secure> Runtime<Q, Secure>
-    where Q: IndexedQueue + Send,
-          Secure: Encryptor
+impl<Q> Runtime<Q> where Q: IndexedQueue + Send
 {
-    pub fn new(iq: Q) -> Runtime<Q, Secure> {
+    pub fn new(iq: Q, me: Option<MetaEncryptor>) -> Runtime<Q> {
         return Runtime {
             iq: iq,
-            e: PhantomData,
 
             obj_ids: HashSet::new(),
             callbacks: HashMap::new(),
@@ -73,16 +44,19 @@ impl<Q, Secure> Runtime<Q, Secure>
             writes: HashSet::new(),
             operations: Vec::new(),
             tx_mode: false,
+
+            secure: me,
         };
     }
+
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
             self.writes.insert(obj_id);
-            self.operations.push(Operation::new(obj_id, Secure::encrypt(data)));
+            self.operations.push(Operation::new(obj_id, data));
         } else {
             self.iq.append(Entry::new(HashMap::new(),
                                       vec![obj_id].into_iter().collect(),
-                                      vec![Operation::new(obj_id, Secure::encrypt(data))],
+                                      vec![Operation::new(obj_id, data)],
                                       TxType::None,
                                       TxState::None));
         }
@@ -186,7 +160,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                             LogOp::Op(ref operator) => {
                                 // operation on tracked object sent to interested ds
                                 let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
-                                let dec_operator = Secure::decrypt(operator.clone());
+                                let dec_operator = operator.clone();
                                 for c in callbacks.iter_mut() {
                                     c(e_idx, Operation::new(obj_id, dec_operator.clone()));
                                 }
@@ -212,7 +186,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                     let obj_id = s.obj_id;
                     let idx = s.idx;
                     let callbacks = self.callbacks.get_mut(&obj_id).unwrap();
-                    let snapshot = Secure::decrypt(s.payload);
+                    let snapshot = s.payload;
                     for c in callbacks.iter_mut() {
                         c(idx, Operation::from_snapshot(obj_id, snapshot.clone()));
                     }
@@ -241,7 +215,7 @@ impl<Q, Secure> Runtime<Q, Secure>
 
                         match op.operator {
                             LogOp::Op(ref operator) => {
-                                let dec_operator = Secure::decrypt(operator.clone());
+                                let dec_operator = operator.clone();
                                 (*c)(e.idx.unwrap(), Operation::new(obj_id, dec_operator));
                             }
                             _ => {
@@ -251,7 +225,7 @@ impl<Q, Secure> Runtime<Q, Secure>
                     }
                 }
                 Ok(LogSnapshot(s)) => {
-                    let snapshot = Secure::decrypt(s.payload);
+                    let snapshot = s.payload;
                     (*c)(s.idx, Operation::from_snapshot(obj_id, snapshot));
                 }
                 Err(_) => break,
@@ -280,13 +254,14 @@ impl<Q, Secure> Runtime<Q, Secure>
 
 #[cfg(test)]
 mod test {
-    use super::{Runtime, Identity};
+    use super::Runtime;
     use indexed_queue::{InMemoryQueue, State};
+    use encryptors::MetaEncryptor;
 
     #[test]
     fn create_runtime() {
         let q = InMemoryQueue::new();
-        let mut r: Runtime<InMemoryQueue, Identity> = Runtime::new(q);
+        let mut r: Runtime<InMemoryQueue> = Runtime::new(q, Some(MetaEncryptor::new()));
         r.append(0, State::Encoded(String::from("Hello")));
     }
 }

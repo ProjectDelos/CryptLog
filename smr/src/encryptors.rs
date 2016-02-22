@@ -3,7 +3,7 @@ extern crate rand;
 extern crate rustc_serialize;
 
 pub use ramp::int::Int;
-use rpaillier::{KeyPair, KeyPairBuilder};
+use rpaillier::{KeyPair, KeyPairBuilder, PublicKey};
 use std::ops::Add;
 use std::str::FromStr;
 use rand::{OsRng, Rng};
@@ -20,28 +20,40 @@ pub struct Addable {
 
 impl Encodable for Addable {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        let ienc = self.i.to_str_radix(36, true);
-        try!(ienc.encode(s));
-        let menc = self.m.to_str_radix(36, true);
-        try!(menc.encode(s));
+        let ienc = self.i.to_str_radix(10, true);
+        let menc = self.m.to_str_radix(10, true);
+        let v = vec![ienc, menc]; // trick to allow json to know delimitations
+        try!(v.encode(s));
         return Ok(());
     }
 }
 
 impl Decodable for Addable {
     fn decode<D: Decoder>(d: &mut D) -> Result<Addable, D::Error> {
-        let ienc = try!(String::decode(d));
-        let i = Int::from_str_radix(&ienc, 36).unwrap();
-        let menc = try!(String::decode(d));
-        let m = Int::from_str_radix(&menc, 36).unwrap();
+        let v = try!(Vec::<String>::decode(d));
+        let i = Int::from_str_radix(&v[0], 10).unwrap();
+        let m = Int::from_str_radix(&v[1], 10).unwrap();
         return Ok(Addable { i: i, m: m });
     }
 }
 
 
 impl Addable {
-    fn new(i: Int, m: Int) -> Addable {
+    pub fn new(i: Int, m: Int) -> Addable {
         Addable { i: i, m: m }
+    }
+
+    pub fn default(pk: PublicKey) -> Addable {
+        Addable {
+            i: pk.encrypt(&Int::from(0)),
+            m: pk.n_squared.clone(),
+        }
+    }
+    pub fn from(i: Int, pk: PublicKey) -> Addable {
+        Addable {
+            i: pk.encrypt(&Int::from(i)),
+            m: pk.n_squared.clone(),
+        }
     }
 }
 
@@ -54,13 +66,16 @@ impl Add for Addable {
     }
 }
 
+#[derive(Clone)]
 pub struct AddEncryptor {
     key_pair: KeyPair,
 }
-
 impl AddEncryptor {
-    fn new() -> AddEncryptor {
+    pub fn new() -> AddEncryptor {
         AddEncryptor { key_pair: KeyPairBuilder::new().bits(128).finalize() }
+    }
+    pub fn public_key(&self) -> PublicKey {
+        return self.key_pair.public_key.clone();
     }
     fn encrypt(&self, i: &Int) -> Addable {
         let pk = &self.key_pair.public_key;
@@ -102,6 +117,7 @@ impl Eqable {
     }
 }
 
+#[derive(Clone)]
 pub struct EqEncryptor {
     encryptor: Encryptor,
 }
@@ -119,6 +135,7 @@ impl EqEncryptor {
     }
 }
 
+#[derive(Clone)]
 pub struct Encryptor {
     key: Vec<u8>,
     nonce: Vec<u8>,
@@ -157,9 +174,60 @@ impl Encryptor {
     }
 }
 
+#[derive(Clone)]
+pub struct MetaEncryptor {
+    eq: EqEncryptor,
+    add: AddEncryptor,
+    enc: Encryptor,
+}
+
+impl MetaEncryptor {
+    pub fn new() -> MetaEncryptor {
+        return MetaEncryptor {
+            eq: EqEncryptor::new(Encryptor::new()),
+            add: AddEncryptor::new(),
+            enc: Encryptor::new(),
+        };
+    }
+
+    pub fn from(eq: EqEncryptor, add: AddEncryptor, enc: Encryptor) -> MetaEncryptor {
+        return MetaEncryptor {
+            eq: eq,
+            add: add,
+            enc: enc,
+        };
+    }
+
+    pub fn encrypt_ahe(&self, data: Int) -> Addable {
+        return self.add.encrypt(&data);
+    }
+    pub fn decrypt_ahe<T: FromStr>(&self, data: Addable) -> Result<T, T::Err> {
+        return self.add.decrypt::<T>(data);
+    }
+
+    pub fn encrypt_ident<T>(t: T) -> T {
+        return t;
+    }
+    pub fn decrypt_ident<T>(t: T) -> T {
+        return t;
+    }
+}
+
+
 #[cfg(test)]
 mod test {
-    use super::{AddEncryptor, Encryptor, EqEncryptor, Int};
+    use super::{AddEncryptor, Encryptor, EqEncryptor, Int, Addable};
+    extern crate rustc_serialize;
+    use self::rustc_serialize::json;
+
+    #[test]
+    fn addable_serialize() {
+        let a = Addable::new(Int::from(10), Int::from(5));
+        let e = json::encode(&a).unwrap();
+        let d: Addable = json::decode(&e).unwrap();
+        assert_eq!(a.i, d.i);
+        assert_eq!(a.m, d.m);
+    }
     #[test]
     fn additive_encryption() {
         let e = AddEncryptor::new();

@@ -11,7 +11,7 @@ use std::time::Duration;
 use std::sync::mpsc;
 
 use indexed_queue::{IndexedQueue, ObjId, LogIndex, Operation, Entry, LogData, Snapshot};
-use runtime::{Runtime, Encryptor, Callback};
+use runtime::{Runtime, Callback};
 use indexed_queue::State::Encoded;
 
 use self::chan::{Sender, Receiver, WaitGroup};
@@ -237,11 +237,10 @@ impl Drop for AsyncSnapshotter {
 //   Snapshotting: keep track of all objects and object ids
 //   Streaming: Keep track of skip list of entries for all objects
 pub struct VM<Q: IndexedQueue + Send,
-              Secure: Encryptor + Send,
               Skip: Skiplist + Clone + Send,
               Snap: Snapshotter + Clone + Send>
 {
-    runtime: Arc<Mutex<Runtime<Q, Secure>>>,
+    runtime: Arc<Mutex<Runtime<Q>>>,
     obj_id: Vec<ObjId>,
     local_queue: Arc<Mutex<HashMap<LogIndex, Entry>>>,
     skiplist: Arc<Mutex<Skip>>,
@@ -251,16 +250,15 @@ pub struct VM<Q: IndexedQueue + Send,
     queue: Q,
 }
 
-impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
+impl<Q, Skip, Snap> VM<Q, Skip, Snap>
     where Q: 'static + IndexedQueue + Clone + Send,
-          Secure: 'static + Encryptor + Send,
           Skip: 'static + Skiplist + Clone + Send,
           Snap: 'static + Snapshotter + Clone + Send
 {
-    pub fn new(q: Q, skiplist: Skip, snapshotter: Snap) -> VM<Q, Secure, Skip, Snap> {
+    pub fn new(q: Q, skiplist: Skip, snapshotter: Snap) -> VM<Q, Skip, Snap> {
         let queue = q.clone();
         let vm = VM {
-            runtime: Arc::new(Mutex::new(Runtime::new(q))),
+            runtime: Arc::new(Mutex::new(Runtime::new(q, None))),
             obj_id: Vec::new(),
             local_queue: Arc::new(Mutex::new(HashMap::new())),
             skiplist: Arc::new(Mutex::new(skiplist)),
@@ -352,9 +350,8 @@ impl<Q, Secure, Skip, Snap> VM<Q, Secure, Skip, Snap>
     }
 }
 
-impl<Q, Secure, Skip, Snap> IndexedQueue for VM<Q, Secure, Skip, Snap>
+impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
     where Q: IndexedQueue + Send + Clone,
-          Secure: Encryptor + Send,
           Skip: Skiplist + Clone + Send,
           Snap: Snapshotter + Clone + Send
 {
@@ -393,9 +390,8 @@ impl<Q, Secure, Skip, Snap> IndexedQueue for VM<Q, Secure, Skip, Snap>
 }
 
 
-impl<Q, Secure, Skip, Snap> Drop for VM<Q, Secure, Skip, Snap>
+impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
     where Q: IndexedQueue + Send,
-          Secure: Encryptor + Send,
           Skip: Skiplist + Clone + Send,
           Snap: Snapshotter + Clone + Send
 {
@@ -414,13 +410,14 @@ mod test {
     extern crate rustc_serialize;
     use self::rustc_serialize::json;
     use super::{VM, Skiplist, MapSkiplist, Snapshotter, AsyncSnapshotter};
-    // use super::*;
 
     use indexed_queue::{SharedQueue, IndexedQueue, ObjId, Operation, LogOp, State};
     use indexed_queue::LogData::LogEntry;
     use indexed_queue::State::Encoded;
-    use runtime::{Identity, Runtime};
-    use ds::{Register, RegisterOp};
+    use runtime::Runtime;
+    use ds::{Register, RegisterOp, IntRegister, AddableRegister};
+    use encryptors::{MetaEncryptor, Addable, Int, AddEncryptor, EqEncryptor, Encryptor};
+
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
     use std::time::Duration;
@@ -453,9 +450,8 @@ mod test {
     fn snapshot_test() {
         let q = SharedQueue::new();
         let mut snapshotter = AsyncSnapshotter::new();
-        let runtime: Arc<Mutex<Runtime<SharedQueue, Identity>>> =
-            Arc::new(Mutex::new(Runtime::new(q)));
-        let reg = Register::new(&runtime, 0, -1);
+        let runtime: Arc<Mutex<Runtime<SharedQueue>>> = Arc::new(Mutex::new(Runtime::new(q, None)));
+        let reg = IntRegister::new(&runtime, 0, -1);
         let mut reg2 = reg.clone();
         snapshotter.register_object(0, Box::new(move |_, e| reg2.callback(e)), reg);
         snapshotter.start();
@@ -474,7 +470,7 @@ mod test {
             assert_eq!(s.idx, 10);
             match s.payload {
                 Encoded(s) => {
-                    let reg: Register<SharedQueue, Identity> = json::decode(&s).unwrap();
+                    let reg: IntRegister<SharedQueue> = json::decode(&s).unwrap();
                     let data = reg.data.lock().unwrap();
                     assert_eq!(*data, 9);
                 }
@@ -485,26 +481,35 @@ mod test {
     #[test]
     fn vm_streaming() {
         let q = SharedQueue::new();
-        let mut vm: VM<SharedQueue, Identity, MapSkiplist, AsyncSnapshotter> =
-            VM::new(q, MapSkiplist::new(), AsyncSnapshotter::new());
-        let mut reg = Register::new(&vm.runtime, 0, -1);
-        let reg1 = reg.clone();
-        let mut reg2 = reg.clone();
+        let mut vm: VM<SharedQueue, MapSkiplist, AsyncSnapshotter> =
+            VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
+        let add_encryptor = AddEncryptor::new();
+        let obj_id: ObjId = 0;
+        let reg = AddableRegister::new(&vm.runtime,
+                                       obj_id,
+                                       Addable::default(add_encryptor.public_key()));
+        let vm_reg = reg.clone();
+        let mut snapshot_reg = reg.clone();
         // register the Register with the VM
-        vm.register_object(0, Box::new(move |_, e| reg2.callback(e)), reg1);
+        vm.register_object(0, Box::new(move |_, e| snapshot_reg.callback(e)), vm_reg);
         vm.start();
 
+        let me = MetaEncryptor::from(EqEncryptor::new(Encryptor::new()),
+                                     add_encryptor.clone(),
+                                     Encryptor::new());
+        let client_runtime = Runtime::new(q, Some(me));
+        let client_runtime = Arc::new(Mutex::new(client_runtime));
+        let mut client_reg = IntRegister::new(&client_runtime, obj_id, 0);
         for i in 0..10 {
-            reg.write(i);
+            client_reg.write(i);
         }
 
         // TODO: do we want to be able to read our own writes? probably...
         // assert_eq!(reg.read(), 9);
 
-
-        vm.runtime.lock().unwrap().sync(Some(0));
+        vm.runtime.lock().unwrap().sync(Some(obj_id));
         let mut i = 0;
-        let entries = vm.stream(&[0].iter().cloned().collect(), 0, None);
+        let entries = vm.stream(&[obj_id].iter().cloned().collect(), 0, None);
         for e in entries {
             match e {
                 LogEntry(e) => {
@@ -519,18 +524,21 @@ mod test {
     #[test]
     fn vm_full() {
         let q = SharedQueue::new();
-        let mut vm: VM<SharedQueue, Identity, MapSkiplist, AsyncSnapshotter> =
+        let mut vm: VM<SharedQueue, MapSkiplist, AsyncSnapshotter> =
             VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
-        let mut reg = Register::new(&vm.runtime, 0, -1);
+
+        let add_encryptor = AddEncryptor::new();
+        // VM does snapshotting in reg, decrypting not needed
+        let mut reg = AddableRegister::new(&vm.runtime,
+                                           -1,
+                                           Addable::default(add_encryptor.public_key()));
         let reg1 = reg.clone();
         // register the Register with the VM
         vm.register_object(0, Box::new(move |_, e| reg.callback(e)), reg1);
         vm.start();
 
-
-        let run: Runtime<SharedQueue, Identity> = Runtime::new(q);
-        let run = Arc::new(Mutex::new(run));
-        let mut reg = Register::new(&run.clone(), 0, -1);
+        let reg_run = Arc::new(Mutex::new(Runtime::new(q, Some(MetaEncryptor::new()))));
+        let mut reg = IntRegister::new(&reg_run, 0, -1);
         reg.start();
 
         for i in 0..150 {
