@@ -18,3 +18,4 @@ pub mod vm;
 pub mod http_data;
 pub mod http_server;
 pub mod encryptors;
+pub mod converters;

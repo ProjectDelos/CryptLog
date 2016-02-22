@@ -7,45 +7,23 @@ use self::rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
 
 use runtime::Runtime;
 use indexed_queue::{Operation, IndexedQueue, State, LogOp};
-use encryptors::{MetaEncryptor, Int, Addable};
+use encryptors::{MetaEncryptor, Addable};
+use converters::{ConvertersLib, AddableConverter};
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::collections::BTreeMap;
-use std::ops::Add;
-
-fn convert_from_addable_addable(secure: &Option<MetaEncryptor>, a: Addable) -> Addable {
-    return a;
-}
-
-fn convert_from_int_addable(secure: &Option<MetaEncryptor>, val: i32) -> Addable {
-    secure.as_ref()
-          .map(|secure| secure.encrypt_ahe(Int::from(val)))
-          .unwrap()
-}
-
-fn convert_from_addable_int(secure: &Option<MetaEncryptor>, a: Addable) -> i32 {
-    match secure {
-        &Some(ref secure) => {
-            match secure.decrypt_ahe::<i32>(a) {
-                Ok(data) => data,
-                Err(e) => panic!("error decrypting {}", e), 
-            }
-        }
-        &None => panic!("no secure given"),
-    }
-}
-
 
 pub type IntRegister<Q> = Register<Q, i32>;
 
 impl<Q> IntRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
 {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>, obj_id: i32, data: i32) -> IntRegister<Q> {
-        let reg = Register::with_callbacks(aruntime,
-                                           obj_id,
-                                           data,
-                                           Box::new(convert_from_addable_int),
-                                           Box::new(convert_from_int_addable));
+        let reg =
+            Register::with_callbacks(aruntime,
+                                     obj_id,
+                                     data,
+                                     AddableConverter::new(ConvertersLib::i32_from_addable(),
+                                                           ConvertersLib::addable_from_i32()));
 
         reg as IntRegister<Q>
     }
@@ -59,11 +37,12 @@ impl<Q> AddableRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
                obj_id: i32,
                data: Addable)
                -> AddableRegister<Q> {
-        let reg = Register::with_callbacks(aruntime,
-                                           obj_id,
-                                           data,
-                                           Box::new(convert_from_addable_addable),
-                                           Box::new(convert_from_addable_addable));
+        let reg =
+            Register::with_callbacks(aruntime,
+                                     obj_id,
+                                     data,
+                                     AddableConverter::new(ConvertersLib::addable_from_addable(),
+                                                           ConvertersLib::addable_from_addable()));
 
         reg as AddableRegister<Q>
     }
@@ -73,8 +52,7 @@ impl<Q> AddableRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
 pub struct Register<Q, I> {
     runtime: Option<Arc<Mutex<Runtime<Q>>>>,
     obj_id: i32,
-    convert_from: Option<Arc<Box<Fn(&Option<MetaEncryptor>, Addable) -> I + Send + Sync>>>,
-    convert_to: Option<Arc<Box<Fn(&Option<MetaEncryptor>, I) -> Addable + Send + Sync>>>,
+    convert: Option<AddableConverter<I>>,
 
     pub data: Arc<Mutex<I>>,
     secure: Option<MetaEncryptor>,
@@ -108,15 +86,13 @@ impl<Q, I> Register<Q, I> {
     pub fn with_callbacks(aruntime: &Arc<Mutex<Runtime<Q>>>,
                           obj_id: i32,
                           data: I,
-                          conv: Box<Fn(&Option<MetaEncryptor>, Addable) -> I + Send + Sync>,
-                          conv_back: Box<Fn(&Option<MetaEncryptor>, I) -> Addable + Send + Sync>)
+                          converter: AddableConverter<I>)
                           -> Register<Q, I> {
         let reg = Register {
             obj_id: obj_id,
             runtime: Some(aruntime.clone()),
-            convert_from: Some(Arc::new(conv)),
-            convert_to: Some(Arc::new(conv_back)),
             data: Arc::new(Mutex::new(data)),
+            convert: Some(converter),
             secure: aruntime.lock().unwrap().secure.clone(),
         };
         return reg;
@@ -126,8 +102,7 @@ impl<Q, I> Register<Q, I> {
         Register {
             obj_id: 0,
             data: Arc::new(Mutex::new(data)),
-            convert_from: None,
-            convert_to: None,
+            convert: None,
             runtime: None,
             secure: None,
         }
@@ -169,7 +144,13 @@ impl<Q, I> Register<Q, I>
     pub fn write(&mut self, val: I) {
         self.with_runtime::<(), _, _>(|mut runtime| {
             let secure = &self.secure;
-            let data: Addable = self.convert_to.as_ref().map(|ct| ct(secure, val)).unwrap();
+            let data: Addable = self.convert
+                                    .as_ref()
+                                    .map(|convert| {
+                                        let to = &convert.to;
+                                        to(secure, val)
+                                    })
+                                    .unwrap();
 
             let encrypted_op = RegisterOp::Write { data: data };
             let op = json::encode(&encrypted_op).unwrap();
@@ -179,7 +160,13 @@ impl<Q, I> Register<Q, I>
 
     pub fn get_data(&self, data: Addable) -> I {
         let secure = &self.secure;
-        self.convert_from.as_ref().map(|cf| cf(secure, data)).unwrap()
+        self.convert
+            .as_ref()
+            .map(|convert| {
+                let from = &convert.from;
+                from(secure, data)
+            })
+            .unwrap()
     }
 
     pub fn callback(&mut self, op: Operation) {
@@ -207,8 +194,7 @@ impl<Q, I> Register<Q, I>
             // could get TX succeeded, mark the variable
             LogOp::Snapshot(State::Encoded(ref s)) => {
                 let mut reg: Register<Q, I> = json::decode(&s).unwrap();
-                reg.convert_from = self.convert_from.clone();
-                reg.convert_to = self.convert_to.clone();
+                reg.convert = self.convert.clone();
                 reg.runtime = self.runtime.clone();
                 *self = reg;
             }
