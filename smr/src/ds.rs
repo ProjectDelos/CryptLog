@@ -11,7 +11,6 @@ use encryptors::{MetaEncryptor, Addable};
 use converters::{ConvertersLib, AddableConverter};
 
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::collections::BTreeMap;
 use std::ops::Add;
 
 pub type IntRegister<Q> = Register<Q, i32>;
@@ -231,144 +230,12 @@ impl<Q, I> Register<Q, I>
     }
 }
 
-#[derive(Clone)]
-pub struct BTMap<K, V, Q> {
-    runtime: Option<Arc<Mutex<Runtime<Q>>>>,
-    obj_id: i32,
-
-    pub data: Arc<Mutex<BTreeMap<K, V>>>,
-}
-
-#[derive(RustcEncodable, RustcDecodable, Debug)]
-pub enum BTMapOp<K, V> {
-    Insert {
-        key: K,
-        val: V,
-    },
-}
-
-impl<K, V, Q> Decodable for BTMap<K, V, Q>
-    where K: Encodable + Decodable + Ord,
-          V: Encodable + Decodable
-{
-    fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
-        let data = try!(Decodable::decode(d));
-        let btmap: BTMap<K, V, Q> = BTMap::default(data);
-        let res: Result<Self, D::Error> = Ok(btmap);
-        return res;
-    }
-}
-
-impl<K, V, Q> Encodable for BTMap<K, V, Q>
-    where K: Encodable + Decodable + Ord,
-          V: Encodable + Decodable
-{
-    fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
-        let data = self.data.lock().unwrap();
-        data.encode(s)
-    }
-}
-
-impl<K, V, Q> BTMap<K, V, Q> {
-    pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
-               obj_id: i32,
-               data: BTreeMap<K, V>)
-               -> BTMap<K, V, Q> {
-        let btmap = BTMap {
-            obj_id: obj_id,
-            runtime: Some(aruntime.clone()),
-            data: Arc::new(Mutex::new(data)),
-        };
-        return btmap;
-    }
-
-    fn default(data: BTreeMap<K, V>) -> BTMap<K, V, Q> {
-        BTMap {
-            obj_id: 0,
-            data: Arc::new(Mutex::new(data)),
-            runtime: None,
-        }
-    }
-}
-
-impl<K, V, Q> BTMap<K, V, Q>
-    where K: 'static + Ord + Send + Clone + Encodable + Decodable,
-          V: 'static + Ord + Send + Clone + Encodable + Decodable,
-          Q: 'static + IndexedQueue + Send + Clone
-{
-    fn with_runtime<R, T, F>(&self, f: F) -> T
-        where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
-    {
-        assert!(self.runtime.is_some(), "invalid runtime");
-        self.runtime
-            .as_ref()
-            .map(|runtime| {
-                let runtime = runtime.lock().unwrap();
-                f(runtime)
-            })
-            .unwrap()
-    }
-
-    pub fn start(&mut self) {
-        self.with_runtime::<(), _, _>(|mut runtime| {
-            let mut obj = self.clone();
-            runtime.register_object(self.obj_id,
-                                    Box::new(move |_, op: Operation| obj.callback(op)));
-
-        });
-    }
-
-    pub fn get(&self, k: &K) -> Option<V> {
-        self.with_runtime::<V, _, _>(|mut runtime| {
-            runtime.sync(Some(self.obj_id));
-            let data = self.data.lock().unwrap();
-            data.get(k).cloned()
-        })
-    }
-
-    pub fn insert(&mut self, k: K, v: V) {
-        self.with_runtime::<(), _, _>(|mut runtime| {
-            let encrypted_op = BTMapOp::Insert {
-                key: MetaEncryptor::encrypt_ident(k),
-                val: MetaEncryptor::encrypt_ident(v),
-            };
-            let op = json::encode(&encrypted_op).unwrap();
-            runtime.append(self.obj_id, State::Encrypted(op.into_bytes()));
-        });
-    }
-
-    pub fn callback(&mut self, op: Operation) {
-        match op.operator {
-            LogOp::Op(State::Encrypted(ref s)) => {
-                let encrypted_op = json::decode(&String::from_utf8(s.clone()).unwrap()).unwrap();
-                match encrypted_op {
-                    BTMapOp::Insert{key: k, val: v} => {
-                        let k = MetaEncryptor::decrypt_ident(k);
-                        let v = MetaEncryptor::decrypt_ident(v);
-                        let mut m_data = self.data.lock().unwrap();
-                        m_data.insert(k, v);
-                    }
-                }
-            }
-            LogOp::Snapshot(State::Encoded(ref s)) => {
-                let obj = json::decode(&s).unwrap();
-                *self = obj;
-            }
-            _ => {
-                unimplemented!();
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod test {
-    use std::collections::BTreeMap;
-    use std::char;
-    use super::{BTMap, IntRegister};
+    use super::IntRegister;
+    use std::sync::{Arc, Mutex};
     use runtime::Runtime;
     use indexed_queue::{InMemoryQueue, SharedQueue, ObjId, TxState};
-    use std::sync::{Arc, Mutex};
     use encryptors::MetaEncryptor;
 
     #[test]
@@ -396,29 +263,6 @@ mod test {
         }
     }
 
-    #[test]
-    fn btmap_read_write() {
-        let q = InMemoryQueue::new();
-        let runtime: Runtime<InMemoryQueue> = Runtime::new(q, Some(MetaEncryptor::new()));
-        let aruntime = Arc::new(Mutex::new(runtime));
-        let n = 5;
-        let obj_id = 1;
-        let mut btmap = BTMap::new(&aruntime, obj_id, BTreeMap::new());
-        btmap.start();
-
-        for key in 0..n {
-            let mut val = String::from("hello_");
-            val.push(char::from_u32(key as u32).unwrap());
-            btmap.insert(key, val.clone());
-            assert_eq!(val, btmap.get(&key).unwrap());
-        }
-
-
-        assert!(btmap.runtime.is_some(), "invalid runtime");
-        btmap.runtime.map(|runtime| {
-            assert_eq!(runtime.lock().unwrap().global_idx, n - 1);
-        });
-    }
 
     #[test]
     fn multiple_objects() {
@@ -428,24 +272,15 @@ mod test {
 
         let mut reg1 = IntRegister::new(&aruntime, 1 as ObjId, 1);
         let mut reg2 = IntRegister::new(&aruntime, 2 as ObjId, 2);
-        let mut btmap = BTMap::new(&aruntime, 3 as ObjId, BTreeMap::new());
         reg1.start();
         reg2.start();
-        btmap.start();
 
         // reg1: 1 + 2 + 3 + 2 + 3
         // reg2: 2^5
-        // btmap[1] = 1 * 10 + 2 + 3 = 15
-        // btmap[2] = 2 * 10 + 2 + 3 = 25
         for turn in 1..3 {
             for i in 2..4 {
                 let x = reg1.read();
                 reg1.write(x + i)
-            }
-
-            for i in 2..4 {
-                let val = btmap.get(&turn);
-                btmap.insert(turn, val.unwrap_or(turn * 10) + i);
             }
 
             for _ in 2..4 {
@@ -461,11 +296,6 @@ mod test {
         reg2b.start();
         assert_eq!(reg1b.read(), 11);
         assert_eq!(reg2b.read(), 32);
-        // check btmap values correctly read in new view
-        let mut btmapb: BTMap<i32, i32, _> = BTMap::new(&aruntime, 3 as ObjId, BTreeMap::new());
-        btmapb.start();
-        assert_eq!(btmapb.get(&1).unwrap(), 15);
-        assert_eq!(btmapb.get(&2).unwrap(), 25);
 
         // check writing to same object via different register view
         reg1b.write(100);
