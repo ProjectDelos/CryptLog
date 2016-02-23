@@ -104,7 +104,6 @@ impl PartialEq for Eqable {
         self.hash == other.hash
     }
 }
-
 impl Eq for Eqable {}
 
 impl Eqable {
@@ -196,6 +195,20 @@ impl MetaEncryptor {
             add: add,
             enc: enc,
         };
+    }
+
+    pub fn encrypt(&self, s: &[u8]) -> Encrypted {
+        self.enc.encrypt(s)
+    }
+    pub fn decrypt(&self, e: Encrypted) -> Vec<u8> {
+        self.enc.decrypt(e)
+    }
+
+    pub fn encrypt_eqable(&self, s: &[u8]) -> Eqable {
+        self.eq.encrypt(s)
+    }
+    pub fn decrypt_eqable(&self, e: Eqable) -> Vec<u8> {
+        self.eq.decrypt(e)
     }
 
     pub fn encrypt_ahe(&self, data: Int) -> Addable {

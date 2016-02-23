@@ -82,7 +82,7 @@ pub enum RegisterOp<T> {
         data: T,
     },
     Inc {
-        add: T
+        add: T,
     },
 }
 
@@ -90,13 +90,13 @@ impl<Q, I> Register<Q, I> {
     pub fn with_callbacks(aruntime: &Arc<Mutex<Runtime<Q>>>,
                           obj_id: i32,
                           data: I,
-                          converter: AddableConverter<I>)
+                          convert: AddableConverter<I>)
                           -> Register<Q, I> {
         let reg = Register {
             obj_id: obj_id,
             runtime: Some(aruntime.clone()),
             data: Arc::new(Mutex::new(data)),
-            convert: Some(converter),
+            convert: Some(convert),
             secure: aruntime.lock().unwrap().secure.clone(),
         };
         return reg;
@@ -115,7 +115,7 @@ impl<Q, I> Register<Q, I> {
 
 impl<Q, I> Register<Q, I>
     where Q: 'static + IndexedQueue + Send + Clone,
-          I: 'static + Encodable + Decodable + Send + Clone + Add<Output=I>
+          I: 'static + Encodable + Decodable + Send + Clone + Add<Output = I>
 {
     fn with_runtime<R, T, F>(&self, f: F) -> T
         where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
@@ -164,11 +164,12 @@ impl<Q, I> Register<Q, I>
     pub fn inc(&mut self, val: I) {
         self.with_runtime::<(), _, _>(|mut runtime| {
             let data: Addable = self.convert
-                .as_ref()
-                .map(|convert| {
-                    let to = &convert.to;
-                    to(&self.secure, val)
-                }).unwrap();
+                                    .as_ref()
+                                    .map(|convert| {
+                                        let to = &convert.to;
+                                        to(&self.secure, val)
+                                    })
+                                    .unwrap();
 
             let encrypted_op = RegisterOp::Inc { add: data };
             let op = json::encode(&encrypted_op).unwrap();
@@ -196,7 +197,7 @@ impl<Q, I> Register<Q, I>
                         let data = self.get_data(data);
                         let mut m_data = self.data.lock().unwrap();
                         *m_data = data;
-                    },
+                    }
                     RegisterOp::Inc{add} => {
                         let add = self.get_data(add);
                         let mut m_data = self.data.lock().unwrap();
@@ -210,7 +211,7 @@ impl<Q, I> Register<Q, I>
                     RegisterOp::Write{data} => {
                         let mut m_data = self.data.lock().unwrap();
                         *m_data = data;
-                    },
+                    }
                     RegisterOp::Inc{add} => {
                         let mut m_data = self.data.lock().unwrap();
                         *m_data = m_data.clone() + add;
