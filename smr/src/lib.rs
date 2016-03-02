@@ -10,6 +10,7 @@ extern crate rpaillier;
 extern crate ramp;
 extern crate rand;
 extern crate openssl;
+extern crate byteorder;
 
 pub mod runtime;
 pub mod indexed_queue;
@@ -20,3 +21,4 @@ pub mod http_server;
 pub mod encryptors;
 pub mod converters;
 pub mod maps;
+pub mod ore;
