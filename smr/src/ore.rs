@@ -1,6 +1,7 @@
 extern crate rand;
 extern crate ramp;
 
+use std::cmp::Ordering;
 use std::marker::PhantomData;
 use self::rand::{SeedableRng, IsaacRng};
 use self::ramp::{Int, RandomInt};
@@ -59,7 +60,45 @@ struct RandomFn<P: PRNG<Int>, T: BitTraversable> {
     pd: PhantomData<T>,
 }
 
-type OrdData = Vec<Int>;
+struct OrdInt {
+    i: Int,
+    m: Int,
+}
+
+impl OrdInt {
+    pub fn new(i: Int, m: Int) -> OrdInt {
+        OrdInt { i: i, m: m }
+    }
+}
+
+impl PartialEq for OrdInt {
+    fn eq(&self, other: &OrdInt) -> bool {
+        self.i == other.i
+    }
+}
+
+impl Eq for OrdInt {}
+
+impl PartialOrd for OrdInt {
+    fn partial_cmp(&self, other: &OrdInt) -> Option<Ordering> {
+        if self.eq(other) {
+            return Some(Ordering::Equal);
+        }
+        let (_, ip1) = (&self.i + Int::one()).divmod(&self.m);
+        if ip1 == other.i {
+            return Some(Ordering::Less);
+        }
+        Some(Ordering::Greater)
+    }
+}
+
+impl Ord for OrdInt {
+    fn cmp(&self, other: &OrdInt) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+type OrdData = Vec<OrdInt>;
 
 impl<P: PRNG<Int>, BT: BitTraversable + Clone> RandomFn<P, BT> {
     pub fn new(prng: P, key: Int, m: Int) -> RandomFn<P, BT> {
@@ -96,12 +135,12 @@ impl<P: PRNG<Int>, BT: BitTraversable + Clone> RandomFn<P, BT> {
             if prev_bit == false {
                 let g0 = g0 + cur_bit_int;
                 let (_, smod) = g0.divmod(&self.m);
-                res.push(smod);
+                res.push(OrdInt::new(smod, self.m.clone()));
                 s = g0;
             } else {
                 let g1 = g1 + cur_bit_int;
                 let (_, smod) = g1.divmod(&self.m);
-                res.push(smod);
+                res.push(OrdInt::new(smod, self.m.clone()));
                 s = g1;
             }
             prev_bit = cur_bit;
@@ -133,13 +172,13 @@ impl PRNG<Int> for RandomIntPRNG {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     extern crate ramp;
     extern crate rand;
     use self::rand::{SeedableRng, IsaacRng};
     use self::ramp::{Int, RandomInt};
+    use std::collections::BTreeMap;
 
     use super::{PRNG, RandomIntPRNG, RandomFn, BitTraversable, Vecu8Traversable};
 
@@ -212,5 +251,34 @@ mod test {
         // for r in &res {
         //    println!("res = {:?}", r);
         // }
+    }
+
+    #[test]
+    fn btreemap_encrypted_keys() {
+        // number generator to help us deterministcly choose a key
+        let mut rng: IsaacRng = SeedableRng::from_seed(vec![1, 2, 3, 4].as_ref());
+        let key = rng.gen_int(128);
+
+        let m = Int::from(2).pow(40);
+
+        let rf: RandomFn<RandomIntPRNG, Vecu8Traversable> = RandomFn::new(RandomIntPRNG, key, m);
+        let keys = vec!["h0", "h1", "h2", "alpha", "h0rry"];
+        let vals = vec![2, 4, 5, 1, 3];
+
+        let mut bmap = BTreeMap::new();
+        for i in 0..keys.len() {
+            // bmap.insert(keys[i].clone(), vals[i].clone());
+            let kb = String::from(keys[i]).into_bytes();
+            let lkb = kb.len() * 8;
+            bmap.insert(rf.on(Vecu8Traversable::new(kb), lkb), vals[i].clone());
+        }
+
+        let mut i = 1;
+        for (_, v) in bmap.iter() {
+            // println!(" {}", v);
+            assert_eq!(v.clone(), i);
+            i += 1;
+        }
+
     }
 }
