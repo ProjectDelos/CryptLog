@@ -6,8 +6,11 @@ use std::marker::PhantomData;
 use self::rand::{SeedableRng, IsaacRng};
 use self::ramp::{Int, RandomInt};
 
+use encryptors::RingInt;
+
 pub trait BitTraversable {
     fn next_bit(&mut self) -> bool;
+    fn bit_len(&mut self) -> usize;
 }
 
 impl BitTraversable for Vecu8Traversable {
@@ -31,16 +34,20 @@ impl BitTraversable for Vecu8Traversable {
             self.next_bit()
         }
     }
+
+    fn bit_len(&mut self) -> usize {
+        self.bt.len() * 8
+    }
 }
 
 #[derive(Clone)]
-struct Vecu8Traversable {
-    bt: Vec<u8>,
+pub struct Vecu8Traversable {
+    pub bt: Vec<u8>,
     count: u8,
 }
 impl Vecu8Traversable {
-    fn new(bt: Vec<u8>) -> Vecu8Traversable {
-        let mut bt = bt;
+    pub fn new(bt: &[u8]) -> Vecu8Traversable {
+        let mut bt = Vec::from(bt);
         bt.reverse(); // bytes must be compared starting with most significant
         return Vecu8Traversable { bt: bt, count: 8 };
     }
@@ -53,23 +60,27 @@ pub trait PRNG<S> {
 
 // random function created from pseudo random number generator P
 // and individually applied to each bit in T
-struct RandomFn<P: PRNG<Int>, T: BitTraversable> {
+#[derive(Clone)]
+pub struct RandomFn<P: PRNG<Int>, T: BitTraversable> {
     prng: P,
     key: Int,
     m: Int,
     pd: PhantomData<T>,
 }
 
-struct OrdInt {
-    i: Int,
-    m: Int,
-}
+// #[derive(Clone, Debug)]
+// pub struct OrdInt {
+//    i: Int,
+//    m: Int,
+// }
 
-impl OrdInt {
-    pub fn new(i: Int, m: Int) -> OrdInt {
-        OrdInt { i: i, m: m }
-    }
-}
+pub type OrdInt = RingInt;
+// impl OrdInt {
+// pub fn new(i: Int, m: Int) -> OrdInt {
+// OrdInt { i: i, m: m }
+// }
+// }
+//
 
 impl PartialEq for OrdInt {
     fn eq(&self, other: &OrdInt) -> bool {
@@ -98,7 +109,7 @@ impl Ord for OrdInt {
     }
 }
 
-type OrdData = Vec<OrdInt>;
+pub type OrdData = Vec<OrdInt>;
 
 impl<P: PRNG<Int>, BT: BitTraversable + Clone> RandomFn<P, BT> {
     pub fn new(prng: P, key: Int, m: Int) -> RandomFn<P, BT> {
@@ -116,13 +127,14 @@ impl<P: PRNG<Int>, BT: BitTraversable + Clone> RandomFn<P, BT> {
     // Random function is obtained by repeatedly calling a PRNG we call G
     // F(key, b0..bi-1) = G(G(G(key)[b0])[b1]...)[bi-1]
     // where g[bi] mean: the first half of g if bi is 0, the second half of g otherwise
-    pub fn on(&self, v: BT, bit_len: usize) -> OrdData {
+    pub fn on(&self, v: BT) -> OrdData {
         let mut v = v.clone();
         let mut s = self.key.clone();
         let mut res = Vec::new();
 
         let mut prev_bit = false;
-        for _ in 0..bit_len {
+        let bl = v.bit_len();
+        for _ in 0..bl {
             let cur_bit = v.next_bit();
             let cur_bit_int = match cur_bit {
                 true => Int::one(),
@@ -150,7 +162,9 @@ impl<P: PRNG<Int>, BT: BitTraversable + Clone> RandomFn<P, BT> {
 }
 
 
-struct RandomIntPRNG;
+#[derive(Clone)]
+pub struct RandomIntPRNG;
+
 impl PRNG<Int> for RandomIntPRNG {
     fn next(&self, s: Int) -> (Int, Int) {
         let mut s = s;
@@ -184,8 +198,8 @@ mod test {
 
     #[test]
     fn use_next_bit() {
-        let mut s0 = Vecu8Traversable::new(String::from("h0").into_bytes());
-        let mut s1 = Vecu8Traversable::new(String::from("h1").into_bytes());
+        let mut s0 = Vecu8Traversable::new(&String::from("h0").into_bytes());
+        let mut s1 = Vecu8Traversable::new(&String::from("h1").into_bytes());
 
         // s0 and s1 differ in only last of the 16 bits
         for _ in 0..8 {
@@ -229,15 +243,10 @@ mod test {
                           ("alphabet", String::from("alphabet").into_bytes()),
                           ("h0rry", String::from("h0rry").into_bytes())];
 
-        let mut ls = Vec::new();
-        for m in &messgs {
-            ls.push(m.1.len() * 8); // bit length
-        }
-
         let mut res = Vec::new();
         for i in 0..messgs.len() {
             let messg = messgs[i].clone();
-            res.push((messg.0, rf.on(Vecu8Traversable::new(messg.1), ls[i])));
+            res.push((messg.0, rf.on(Vecu8Traversable::new(&messg.1))));
         }
 
         // sort by orderable encryption
@@ -269,8 +278,7 @@ mod test {
         for i in 0..keys.len() {
             // bmap.insert(keys[i].clone(), vals[i].clone());
             let kb = String::from(keys[i]).into_bytes();
-            let lkb = kb.len() * 8;
-            bmap.insert(rf.on(Vecu8Traversable::new(kb), lkb), vals[i].clone());
+            bmap.insert(rf.on(Vecu8Traversable::new(&kb)), vals[i].clone());
         }
 
         let mut i = 1;

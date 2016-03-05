@@ -146,7 +146,9 @@ impl Snapshotter for AsyncSnapshotter {
             while let Some(msg) = obj_chan_rx.recv() {
                 match msg {
                     SnapshotRequest(wg, idx) => {
+                        println!("snapshotrequest idx = {} obj_id = {}", idx, obj_id);
                         let snap = json::encode(&obj).unwrap();
+                        // println!("snap {}", snap);
                         // send the snapshot to the snapshot aggregator/sender
                         snapshots_tx.send((wg, Snapshot::new(obj_id, idx, Encoded(snap))));
                     }
@@ -365,7 +367,6 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
-        from -= 1;
         let (tx, rx) = mpsc::channel();
         let snaps = self.snapshots.lock().unwrap().get_snapshots(obj_ids);
         for (_, snapshot) in snaps {
@@ -417,7 +418,7 @@ mod test {
     use indexed_queue::State::Encoded;
     use runtime::Runtime;
     use ds::{RegisterOp, IntRegister, AddableRegister};
-    use encryptors::{MetaEncryptor, Addable, AddEncryptor, EqEncryptor, Encryptor};
+    use encryptors::{MetaEncryptor, Addable, AddEncryptor, EqEncryptor, Encryptor, OrdEncryptor};
 
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
@@ -499,7 +500,8 @@ mod test {
 
         let me = MetaEncryptor::from(EqEncryptor::new(Encryptor::new()),
                                      add_encryptor.clone(),
-                                     Encryptor::new());
+                                     Encryptor::new(),
+                                     OrdEncryptor::new(Encryptor::new()));
         let client_runtime = Runtime::new(q, Some(me));
         let client_runtime = Arc::new(Mutex::new(client_runtime));
         let mut client_reg = IntRegister::new(&client_runtime, obj_id, 0);
@@ -521,6 +523,7 @@ mod test {
         }
         assert_eq!(i, 10);
     }
+
     #[test]
     fn vm_full() {
         let q = SharedQueue::new();

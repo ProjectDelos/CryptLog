@@ -1,7 +1,7 @@
 extern crate rustc_serialize;
 use self::rustc_serialize::json;
 use self::rustc_serialize::{Encodable, Decodable};
-use encryptors::{MetaEncryptor, Addable, Eqable, Encrypted, Int};
+use encryptors::{MetaEncryptor, Addable, Eqable, Ordable, Encrypted, Int};
 
 use std::sync::Arc;
 
@@ -28,6 +28,32 @@ impl ConvertersLib {
             }
             &None => panic!("no secure given"),
         }
+    }
+
+    fn m_ordable_from_ordable(secure: &Option<MetaEncryptor>, e: Ordable) -> Ordable {
+        e
+    }
+
+    fn m_ordable_from_encodable<E: Encodable + Decodable>(secure: &Option<MetaEncryptor>,
+                                                          s: E)
+                                                          -> Ordable {
+        let data = json::encode(&s).unwrap();
+        secure.as_ref()
+              .map(|secure| secure.encrypt_ordable(&data.into_bytes()))
+              .unwrap()
+    }
+
+    fn m_encodable_from_ordable<E: Encodable + Decodable>(secure: &Option<MetaEncryptor>,
+                                                          e: Ordable)
+                                                          -> E {
+        match secure {
+            &Some(ref secure) => {
+                let data = String::from_utf8(secure.decrypt_ordable(e)).unwrap();
+                json::decode(&data).unwrap()
+            }
+            &None => panic!("no secure given"),
+        }
+
     }
 
     fn m_eqable_from_eqable(secure: &Option<MetaEncryptor>, e: Eqable) -> Eqable {
@@ -96,6 +122,27 @@ impl ConvertersLib {
         Box::new(ConvertersLib::m_i32_from_addable)
     }
 
+    pub fn ordable_from_ordable
+        ()
+        -> Box<Fn(&Option<MetaEncryptor>, Ordable) -> Ordable + Send + Sync>
+    {
+        Box::new(ConvertersLib::m_ordable_from_ordable)
+    }
+
+    pub fn ordable_from_encodable<E: 'static + Encodable + Decodable>
+        ()
+        -> Box<Fn(&Option<MetaEncryptor>, E) -> Ordable + Send + Sync>
+    {
+        Box::new(ConvertersLib::m_ordable_from_encodable)
+    }
+
+    pub fn encodable_from_ordable<E: 'static + Encodable + Decodable>
+        ()
+        -> Box<Fn(&Option<MetaEncryptor>, Ordable) -> E + Send + Sync>
+    {
+        Box::new(ConvertersLib::m_encodable_from_ordable)
+    }
+
     pub fn eqable_from_eqable
         ()
         -> Box<Fn(&Option<MetaEncryptor>, Eqable) -> Eqable + Send + Sync>
@@ -103,7 +150,6 @@ impl ConvertersLib {
         Box::new(ConvertersLib::m_eqable_from_eqable)
     }
 
-    // pass in Encodable instead of Vec<u8> and do json encode here
     pub fn eqable_from_encodable<E: 'static + Encodable + Decodable>
         ()
         -> Box<Fn(&Option<MetaEncryptor>, E) -> Eqable + Send + Sync>
@@ -175,6 +221,23 @@ impl<T> EqableConverter<T> {
 }
 
 #[derive(Clone)]
+pub struct OrdableConverter<T> {
+    pub from: Arc<Box<Fn(&Option<MetaEncryptor>, Ordable) -> T + Send + Sync>>,
+    pub to: Arc<Box<Fn(&Option<MetaEncryptor>, T) -> Ordable + Send + Sync>>,
+}
+
+impl<T> OrdableConverter<T> {
+    pub fn new(from: Box<Fn(&Option<MetaEncryptor>, Ordable) -> T + Send + Sync>,
+               to: Box<Fn(&Option<MetaEncryptor>, T) -> Ordable + Send + Sync>)
+               -> OrdableConverter<T> {
+        OrdableConverter {
+            from: Arc::new(from),
+            to: Arc::new(to),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Converter<T> {
     pub from: Arc<Box<Fn(&Option<MetaEncryptor>, Encrypted) -> T + Send + Sync>>,
     pub to: Arc<Box<Fn(&Option<MetaEncryptor>, T) -> Encrypted + Send + Sync>>,
@@ -193,7 +256,7 @@ impl<T> Converter<T> {
 
 #[cfg(test)]
 mod test {
-    use super::{ConvertersLib, AddableConverter, EqableConverter, Converter};
+    use super::{ConvertersLib, AddableConverter, EqableConverter, OrdableConverter, Converter};
 
     #[test]
     fn create_addable_converter() {
@@ -207,6 +270,14 @@ mod test {
         let _: EqableConverter<String> =
             EqableConverter::new(ConvertersLib::encodable_from_eqable(),
                                  ConvertersLib::eqable_from_encodable());
+
+    }
+
+    #[test]
+    fn create_ordable_converter() {
+        let _: OrdableConverter<String> =
+            OrdableConverter::new(ConvertersLib::encodable_from_ordable(),
+                                  ConvertersLib::ordable_from_encodable());
 
     }
 
