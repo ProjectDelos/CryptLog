@@ -371,13 +371,13 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
         let snaps = self.snapshots.lock().unwrap().get_snapshots(obj_ids);
         for (_, snapshot) in snaps {
             if from <= snapshot.idx && (to.is_none() || snapshot.idx <= to.unwrap()) {
-                from = snapshot.idx; // all snapshots are guaranteed to have the same index
+                from = snapshot.idx + 1; // all snapshots are guaranteed to have the same index
                 tx.send(LogSnapshot(snapshot)).unwrap();
             }
         }
         let idxs = self.skiplist.lock().unwrap().stream(obj_ids, from, to);
         for idx in idxs {
-            if idx <= from {
+            if idx < from {
                 continue;
             }
             let local_queue = self.local_queue.lock().unwrap();
