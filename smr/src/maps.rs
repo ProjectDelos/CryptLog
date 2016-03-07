@@ -404,9 +404,12 @@ impl<K, V, Q> BTMap<K, V, Q>
                 }
             }
             LogOp::Snapshot(State::Encoded(ref s)) => {
-                println!("client gets snapshot");
-                let obj = json::decode(&s).unwrap();
-                *self = obj;
+                let mut obj: BTreeMap<Ordable, Encrypted> = json::decode(&s).unwrap();
+                let mut converted = BTreeMap::new();
+                for (k, v) in obj.iter_mut() {
+                    converted.insert(self.get_key(k.clone()), self.get_val(v.clone()));
+                }
+                *self.data.lock().unwrap() = converted;
             }
             _ => {
                 unimplemented!();
@@ -482,7 +485,7 @@ mod test {
                              });
 
         for i in 0..keys.len() {
-            let (key, val) = btmap.pop_first().unwrap();
+            let (_, val) = btmap.pop_first().unwrap();
             // println!("key {:?} val {:?}", key, val);
             assert_eq!(val, vals[should_be_at[i]]);
         }

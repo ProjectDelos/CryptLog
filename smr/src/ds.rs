@@ -277,7 +277,7 @@ mod test {
 
         // reg1: 1 + 2 + 3 + 2 + 3
         // reg2: 2^5
-        for turn in 1..3 {
+        for _ in 1..3 {
             for i in 2..4 {
                 let x = reg1.read();
                 reg1.write(x + i)

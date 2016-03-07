@@ -126,6 +126,7 @@ impl Entry {
 
 pub trait IndexedQueue {
     fn append(&mut self, e: Entry) -> LogIndex;
+    // to is non inclusive
     fn stream(&mut self,
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,

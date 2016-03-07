@@ -116,9 +116,6 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         }
 
         // sync all objects runtime tracks
-        if obj_id.is_some() {
-            println!("runtime sync g_idx {}", self.global_idx + 1);
-        }
         let rx = self.iq.stream(&self.obj_ids, self.global_idx + 1, None);
         // send updates to relevant callbacks
         loop {
@@ -152,7 +149,6 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                             continue;
                         }
                         let obj_id = op.obj_id;
-
                         match op.operator {
                             LogOp::Op(ref operator) => {
                                 // operation on tracked object sent to interested ds
@@ -180,9 +176,6 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                     }
                 }
                 Ok(LogSnapshot(s)) => {
-                    if obj_id.is_some() {
-                        println!("runtime: glob_idx {} snap.idx {}", self.global_idx, s.idx);
-                    }
                     self.global_idx = s.idx as LogIndex;
 
                     if !self.obj_ids.contains(&s.obj_id) {
@@ -206,7 +199,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
         let rx = self.iq.stream(&vec![obj_id].into_iter().collect(),
                                 0,
-                                Some(self.global_idx + 1));
+                                Some(self.global_idx));
 
         loop {
             match rx.recv() {

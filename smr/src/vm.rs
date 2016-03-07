@@ -68,7 +68,7 @@ impl Skiplist for MapSkiplist {
         for obj in skiplist.keys() {
             if obj_ids.contains(obj) {
                 for &idx in &skiplist[obj] {
-                    if from <= idx && idx <= to.unwrap_or(idx) {
+                    if from <= idx && idx < to.unwrap_or(idx + 1) {
                         set.insert(idx);
                     }
                 }
@@ -146,9 +146,7 @@ impl Snapshotter for AsyncSnapshotter {
             while let Some(msg) = obj_chan_rx.recv() {
                 match msg {
                     SnapshotRequest(wg, idx) => {
-                        println!("snapshotrequest idx = {} obj_id = {}", idx, obj_id);
                         let snap = json::encode(&obj).unwrap();
-                        // println!("snap {}", snap);
                         // send the snapshot to the snapshot aggregator/sender
                         snapshots_tx.send((wg, Snapshot::new(obj_id, idx, Encoded(snap))));
                     }
@@ -300,6 +298,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
                             new_queue.insert(i, entry);
                         }
                     }
+                    *local_queue = new_queue;
                     // Leave 100 entries in case clients are reading from them
                     skiplist.lock().unwrap().gc(idx - 50);
                 }
@@ -369,12 +368,14 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
         let (tx, rx) = mpsc::channel();
         let snaps = self.snapshots.lock().unwrap().get_snapshots(obj_ids);
+        let mut new_from = from;
         for (_, snapshot) in snaps {
-            if from <= snapshot.idx && (to.is_none() || snapshot.idx <= to.unwrap()) {
-                from = snapshot.idx + 1; // all snapshots are guaranteed to have the same index
+            if from <= snapshot.idx && (to.is_none() || snapshot.idx < to.unwrap()) {
+                new_from = snapshot.idx + 1; // all snapshots are guaranteed to have the same index
                 tx.send(LogSnapshot(snapshot)).unwrap();
             }
         }
+        from = new_from;
         let idxs = self.skiplist.lock().unwrap().stream(obj_ids, from, to);
         for idx in idxs {
             if idx < from {
@@ -382,7 +383,8 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
             }
             let local_queue = self.local_queue.lock().unwrap();
             let entry = local_queue.get(&idx)
-                                   .expect("skiplist entries should be in local log")
+                                   .expect(&format!("skiplist entries should be in local log: {}",
+                                                    idx))
                                    .clone();
             tx.send(LogEntry(entry)).unwrap();
         }
@@ -438,9 +440,9 @@ mod test {
             }
         }
         let stream = skiplist.stream(&[0, 1].iter().cloned().collect(), 0, Some(4));
-        assert_eq!(stream, [0, 1, 2, 4]);
+        assert_eq!(stream, [0, 1, 2]);
         let stream = skiplist.stream(&[0, 1].iter().cloned().collect(), 1, Some(5));
-        assert_eq!(stream, [1, 2, 4, 5]);
+        assert_eq!(stream, [1, 2, 4]);
         let stream = skiplist.stream(&[0].iter().cloned().collect(), 0, None);
         assert_eq!(stream, [0, 2, 4, 5, 9]);
         // gc test

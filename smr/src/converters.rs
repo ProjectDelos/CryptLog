@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub struct ConvertersLib;
 
 impl ConvertersLib {
-    fn m_addable_from_addable(secure: &Option<MetaEncryptor>, a: Addable) -> Addable {
+    fn m_addable_from_addable(_: &Option<MetaEncryptor>, a: Addable) -> Addable {
         return a;
     }
 
@@ -30,7 +30,7 @@ impl ConvertersLib {
         }
     }
 
-    fn m_ordable_from_ordable(secure: &Option<MetaEncryptor>, e: Ordable) -> Ordable {
+    fn m_ordable_from_ordable(_: &Option<MetaEncryptor>, e: Ordable) -> Ordable {
         e
     }
 
@@ -56,7 +56,7 @@ impl ConvertersLib {
 
     }
 
-    fn m_eqable_from_eqable(secure: &Option<MetaEncryptor>, e: Eqable) -> Eqable {
+    fn m_eqable_from_eqable(_: &Option<MetaEncryptor>, e: Eqable) -> Eqable {
         e
     }
 
@@ -82,7 +82,7 @@ impl ConvertersLib {
 
     }
 
-    fn m_encrypted_from_encrypted(secure: &Option<MetaEncryptor>, e: Encrypted) -> Encrypted {
+    fn m_encrypted_from_encrypted(_: &Option<MetaEncryptor>, e: Encrypted) -> Encrypted {
         e
     }
 
