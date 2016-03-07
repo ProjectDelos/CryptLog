@@ -20,6 +20,39 @@ pub enum MapOp<K, V> {
     },
 }
 
+pub type StringHMap<Q> = HMap<String, String, Q>;
+impl<Q> StringHMap<Q> {
+    pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
+               obj_id: i32,
+               data: HashMap<String, String>)
+               -> StringHMap<Q> {
+        HMap::from(aruntime,
+                   obj_id,
+                   data,
+                   Converter::new(ConvertersLib::encodable_from_encrypted(),
+                                  ConvertersLib::encrypted_from_encodable()),
+                   EqableConverter::new(ConvertersLib::encodable_from_eqable(),
+                                        ConvertersLib::eqable_from_encodable()))
+    }
+}
+
+
+pub type EncHMap<Q> = HMap<Eqable, Encrypted, Q>;
+impl<Q> EncHMap<Q> {
+    pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
+               obj_id: i32,
+               data: HashMap<Eqable, Encrypted>)
+               -> EncHMap<Q> {
+        HMap::from(aruntime,
+                   obj_id,
+                   data,
+                   Converter::new(ConvertersLib::encrypted_from_encrypted(),
+                                  ConvertersLib::encrypted_from_encrypted()),
+                   EqableConverter::new(ConvertersLib::eqable_from_eqable(),
+                                        ConvertersLib::eqable_from_eqable()))
+    }
+}
+
 #[derive(Clone)]
 pub struct HMap<K, V, Q> {
     runtime: Option<Arc<Mutex<Runtime<Q>>>>,
@@ -37,7 +70,11 @@ impl<K, V, Q> Decodable for HMap<K, V, Q>
           V: Encodable + Decodable
 {
     fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
-        let data = try!(Decodable::decode(d));
+        let mut vec: Vec<(K, V)> = try!(Decodable::decode(d));
+        let mut data: HashMap<K, V> = HashMap::new();
+        for (k, v) in vec.drain(..) {
+            data.insert(k, v);
+        }
         let hmap: HMap<K, V, Q> = HMap::default(data);
         let res: Result<Self, D::Error> = Ok(hmap);
         return res;
@@ -45,23 +82,27 @@ impl<K, V, Q> Decodable for HMap<K, V, Q>
 }
 
 impl<K, V, Q> Encodable for HMap<K, V, Q>
-    where K: Encodable + Decodable + Hash + Eq,
-          V: Encodable + Decodable
+    where K: Encodable + Decodable + Hash + Eq + Clone,
+          V: Encodable + Decodable + Clone
 {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         let data = self.data.lock().unwrap();
-        data.encode(s)
+        let mut vec: Vec<(K, V)> = Vec::new();
+        for (k, v) in data.iter() {
+            vec.push((k.clone(), v.clone()));
+        }
+        vec.encode(s)
     }
 }
 
 // TODO: see if worth it to 'inherit' from more generic Map
 impl<K, V, Q> HMap<K, V, Q> {
-    pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
-               obj_id: i32,
-               data: HashMap<K, V>,
-               convert: Converter<V>,
-               convert_eq: EqableConverter<K>)
-               -> HMap<K, V, Q> {
+    pub fn from(aruntime: &Arc<Mutex<Runtime<Q>>>,
+                obj_id: i32,
+                data: HashMap<K, V>,
+                convert: Converter<V>,
+                convert_eq: EqableConverter<K>)
+                -> HMap<K, V, Q> {
         let hmap = HMap {
             obj_id: obj_id,
             runtime: Some(aruntime.clone()),
@@ -180,8 +221,13 @@ impl<K, V, Q> HMap<K, V, Q>
                 }
             }
             LogOp::Snapshot(State::Encoded(ref s)) => {
-                let obj = json::decode(&s).unwrap();
-                *self = obj;
+                let obj: HMap<Eqable, Encrypted, Q> = json::decode(&s).unwrap();
+                let mut converted: HashMap<K, V> = HashMap::new();
+                let data = obj.data.lock().unwrap();
+                for (k, v) in data.iter() {
+                    converted.insert(self.get_key(k.clone()), self.get_val(v.clone()));
+                }
+                *self.data.lock().unwrap() = converted;
             }
             _ => {
                 unimplemented!();
@@ -420,7 +466,7 @@ impl<K, V, Q> BTMap<K, V, Q>
 
 #[cfg(test)]
 mod test {
-    use super::{HMap, StringBTMap};
+    use super::{HMap, StringHMap, StringBTMap};
     use std::collections::{HashMap, BTreeMap};
     use std::char;
     use std::sync::{Arc, Mutex};
@@ -442,14 +488,15 @@ mod test {
         let converter_eq: EqableConverter<i32> =
             EqableConverter::new(ConvertersLib::encodable_from_eqable(),
                                  ConvertersLib::eqable_from_encodable());
-        let mut hmap = HMap::new(&aruntime, obj_id, HashMap::new(), converter, converter_eq);
+        let mut hmap = StringHMap::new(&aruntime, obj_id, HashMap::new());
         hmap.start();
 
         for key in 0..n {
             let mut val = String::from("hello_");
             val.push(char::from_u32(key as u32).unwrap());
-            hmap.insert(key, val.clone());
-            assert_eq!(val, hmap.get(&key).unwrap());
+            let key2: String = key.to_string();
+            hmap.insert(key2.clone(), val.clone());
+            assert_eq!(val, hmap.get(&key2).unwrap());
         }
 
         assert!(hmap.runtime.is_some(), "invalid runtime");

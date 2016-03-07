@@ -6,6 +6,7 @@ use std::ops::Add;
 use std::str::FromStr;
 use std::iter::repeat;
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 
 pub use ramp::int::{Int, RandomInt};
 use rpaillier::{KeyPair, KeyPairBuilder, PublicKey};
@@ -237,6 +238,14 @@ impl Encrypted {
 pub struct Eqable {
     hash: Vec<u8>,
     encrypted: Encrypted,
+}
+
+impl Hash for Eqable {
+    fn hash<H>(&self, state: &mut H)
+        where H: Hasher
+    {
+        state.write(&self.hash);
+    }
 }
 
 impl PartialEq for Eqable {

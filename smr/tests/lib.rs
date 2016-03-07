@@ -4,7 +4,7 @@ extern crate rustc_serialize;
 use self::rustc_serialize::json;
 
 use smr::ds::{IntRegister, AddableRegister};
-use smr::maps::{StringBTMap, EncBTMap};
+use smr::maps::{StringBTMap, EncBTMap, StringHMap, EncHMap};
 use smr::runtime::Runtime;
 use smr::indexed_queue::{SharedQueue, ObjId, LogData};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ use smr::vm::{VM, MapSkiplist, Snapshotter, AsyncSnapshotter};
 use smr::encryptors::{MetaEncryptor, Encryptor, AddEncryptor, EqEncryptor, OrdEncryptor, Addable,
                       Ordable, Encrypted};
 use smr::indexed_queue::IndexedQueue;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use std::thread;
 
@@ -283,5 +283,76 @@ fn btmap_integration_tests() {
         // println!("key {:?} val {:?}", key, val);
         assert_eq!(val, vals[should_be_at[i]]);
         assert_eq!(val2, vals2[should_be_at[i]]);
+    }
+}
+
+#[test]
+fn hmap_integration_tests() {
+    let q = SharedQueue::new();
+    let encryptor = MetaEncryptor::new();
+    // SETUP VM
+    let mut vm = VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
+    let vm_map1 = EncHMap::new(&vm.runtime, 1 as ObjId, HashMap::new());
+    let mut vm_map1_copy = vm_map1.clone();
+    vm.register_object(1 as ObjId,
+                       Box::new(move |_, e| vm_map1_copy.callback(e)),
+                       vm_map1.clone());
+
+    let vm_map2 = EncHMap::new(&vm.runtime, 2 as ObjId, HashMap::new());
+    let mut vm_map2_copy = vm_map2.clone();
+    vm.register_object(2 as ObjId,
+                       Box::new(move |_, e| vm_map2_copy.callback(e)),
+                       vm_map2.clone());
+    vm.start();
+
+    // SETUP CLIENT REGISTERS
+    println!("Starting Client BTMaps");
+    let runtime: Runtime<SharedQueue> = Runtime::new(q.clone(), Some(encryptor.clone()));
+    let aruntime = Arc::new(Mutex::new(runtime));
+
+    let mut hmap1 = StringHMap::new(&aruntime, 1 as ObjId, HashMap::new());
+    let mut hmap2 = StringHMap::new(&aruntime, 2 as ObjId, HashMap::new());
+    hmap1.start();
+    hmap2.start();
+
+    // Execute many writes
+    println!("Execute map writes");
+    let keys = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
+    let vals = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
+    let vals2 = vec!["v2h0", "v2h1", "v2h2", "v2alphabet", "v2h0rry"];
+    let nkeys = keys.len();
+    let rounds = 50;
+    for i in 0..rounds {
+        let mi = i % nkeys;
+        hmap1.insert(String::from(keys[mi].clone()),
+                     String::from(vals[mi].clone()));
+        hmap2.insert(String::from(keys[mi].clone()),
+                     String::from(vals2[mi].clone()));
+    }
+    println!("READING VALUES: 1");
+    // Read values (should come from snapshots)
+    for i in 0..nkeys {
+        assert_eq!(hmap1.get(&String::from(keys[i].clone())).unwrap(), vals[i]);
+        assert_eq!(hmap2.get(&String::from(keys[i].clone())).unwrap(), vals2[i]);
+    }
+
+    // check if maps can recover from the vm
+    // this validates the snapshotting of the vm
+    println!("Setting up VM as BTMap Runtime");
+    let meta_runtime = Runtime::new(vm, Some(encryptor));
+    let a_meta_runtime = Arc::new(Mutex::new(meta_runtime));
+    let mut meta_hmap1 = StringHMap::new(&a_meta_runtime, 1 as ObjId, HashMap::new());
+    let mut meta_hmap2 = StringHMap::new(&a_meta_runtime, 2 as ObjId, HashMap::new());
+    println!("Starting VM BTMaps");
+    meta_hmap1.start();
+    meta_hmap2.start();
+
+    println!("READING VALUES: From VM");
+    // Read values (should come from snapshots)
+    for i in 0..nkeys {
+        assert_eq!(meta_hmap1.get(&String::from(keys[i].clone())).unwrap(),
+                   vals[i]);
+        assert_eq!(meta_hmap2.get(&String::from(keys[i].clone())).unwrap(),
+                   vals2[i]);
     }
 }
