@@ -127,6 +127,7 @@ impl Entry {
 pub trait IndexedQueue {
     fn append(&mut self, e: Entry) -> LogIndex;
     // to is non inclusive
+    // if to is not specified: streams up to the length of the log (as read at the beginning of the function)
     fn stream(&mut self,
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
@@ -159,6 +160,9 @@ impl IndexedQueue for InMemoryQueue {
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
         use self::LogData::LogEntry;
+
+        // do not need to check against length here
+        // because it is guaranteed to be accessed by only one accessor at a time
         let to = match to {
             Some(idx) => idx,
             None => self.q.len() as LogIndex,
@@ -285,6 +289,7 @@ impl DynamoQueue {
 
 impl IndexedQueue for DynamoQueue {
     fn append(&mut self, e: Entry) -> LogIndex {
+
         let data = json::encode(&e).unwrap();
         loop {
             match self.client.put(self.index, &data, true) {
@@ -307,9 +312,17 @@ impl IndexedQueue for DynamoQueue {
               mut from: LogIndex,
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
+        let length = match self.client.length() {
+            Err(_) => unimplemented!(),
+            Ok(l) => l,
+        };
         use self::LogData::LogEntry;
         let (tx, rx) = mpsc::channel();
         loop {
+            // stop if we have read up to length or to to
+            if from >= length {
+                return rx;
+            }
             if to.is_some() && from > to.unwrap() {
                 return rx;
             }
@@ -348,6 +361,7 @@ pub enum RequestType {
     Put = 0,
     Get = 1,
     Delete = 2,
+    Length = 3,
 }
 
 
@@ -365,6 +379,7 @@ struct DynamoResponse {
     request_number: i64,
     index: i64,
     data: String,
+    length: i64,
     error: String,
     validation_error: bool,
 }
@@ -439,6 +454,18 @@ impl DynamoClient {
         self.request_number += 1;
         try!(self.make_request(req));
         return Ok(());
+    }
+    pub fn length(&mut self) -> Result<i64, DynamoError> {
+        let req = DynamoRequest {
+            request_number: self.request_number,
+            request_type: RequestType::Length as i64,
+            conditional: false,
+            index: 0,
+            data: "".to_string(),
+        };
+        self.request_number += 1;
+        let resp = try!(self.make_request(req));
+        return Ok(resp.length);
     }
 }
 

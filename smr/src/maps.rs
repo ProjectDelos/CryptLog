@@ -466,7 +466,7 @@ impl<K, V, Q> BTMap<K, V, Q>
 
 #[cfg(test)]
 mod test {
-    use super::{HMap, StringHMap, StringBTMap};
+    use super::{StringHMap, StringBTMap};
     use std::collections::{HashMap, BTreeMap};
     use std::char;
     use std::sync::{Arc, Mutex};
@@ -482,10 +482,10 @@ mod test {
         let aruntime = Arc::new(Mutex::new(runtime));
         let n = 5;
         let obj_id = 1;
-        let converter: Converter<String> =
+        let _: Converter<String> =
             Converter::new(ConvertersLib::encodable_from_encrypted(),
                            ConvertersLib::encrypted_from_encodable());
-        let converter_eq: EqableConverter<i32> =
+        let _: EqableConverter<i32> =
             EqableConverter::new(ConvertersLib::encodable_from_eqable(),
                                  ConvertersLib::eqable_from_encodable());
         let mut hmap = StringHMap::new(&aruntime, obj_id, HashMap::new());

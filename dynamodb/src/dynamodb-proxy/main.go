@@ -47,6 +47,19 @@ func dbEntryFromItem(item map[string]*dynamodb.AttributeValue) (dbEntry, error) 
 	}, err
 }
 
+func lengthFromItem(item map[string]*dynamodb.AttributeValue) (int64, error) {
+	if item["QueueLength"] == nil {
+		return 0, nil
+	}
+
+	length, err := strconv.ParseInt(*item["QueueLength"].N, 10, 64)
+	if err != nil {
+		log.Panicf("error parsing QueueLength: %s\n", err)
+	}
+
+	return length, err
+}
+
 func del(index int64) error {
 	log.Println("DELETING INDEX:", index)
 	// i := "index"
@@ -120,6 +133,51 @@ func put(index int64, data string, conditional bool) (error, bool) {
 	return nil, false
 }
 
+func updateLength() error {
+	params := &dynamodb.UpdateItemInput{
+		TableName: aws.String(table),
+		Key: map[string]*dynamodb.AttributeValue{
+			"QueueLength": {
+				S: aws.String("QueueLength"),
+			},
+		},
+		UpdateExpression: aws.String("ADD Length 1"),
+	}
+	_, err := svc.UpdateItem(params)
+
+	if err != nil {
+		// Print the error, cast err to awserr.Error to get the Code and
+		// Message from an error.
+		log.Println("Failed updateLength:", err.Error())
+		return err
+	}
+	return nil
+}
+
+func length() (int64, error) {
+	log.Println("Getting Length")
+	params := &dynamodb.GetItemInput{
+		Key: map[string]*dynamodb.AttributeValue{
+			"QueueLength": {
+				S: aws.String("QueueLength"),
+			},
+		},
+		TableName:      aws.String(table),
+		ConsistentRead: aws.Bool(true),
+	}
+	resp, err := svc.GetItem(params)
+
+	if err != nil {
+		log.Println("GET: Err: assuming length = 0", err.Error())
+		return 0, nil
+	}
+
+	fmt.Println("GET: RESP:", resp)
+	l, err := lengthFromItem(resp.Item)
+	fmt.Println("l:", l, err)
+	return l, nil
+}
+
 // RequestType is the type of request
 type RequestType int64
 
@@ -128,6 +186,7 @@ const (
 	Put    RequestType = 0
 	Get                = 1
 	Delete             = 2
+	Length             = 3
 )
 
 // Request for log
@@ -144,6 +203,7 @@ type Response struct {
 	RequestNumber int64  `json:"request_number"`
 	Index         int64  `json:"index"`
 	Data          string `json:"data"`
+	Length        int64  `json:"length"`
 	Err           string `json:"error"`
 	ValidationErr bool   `json:"validation_error"`
 }
@@ -169,14 +229,35 @@ func handleConnection(conn net.Conn) {
 		switch req.RequestType {
 		case Put:
 			var valErr bool
-			err, valErr = put(req.Index, req.Data, req.Conditional)
-			resp.ValidationErr = valErr
+			for {
+				err, valErr = put(req.Index, req.Data, req.Conditional)
+				// there was a validation error
+				if err != nil && !valErr {
+					break
+				}
+				// it was successful
+				if err == nil {
+					break
+				}
+				// it was a validation error: try the next index
+				req.Index++
+				resp.Index++
+			}
+			resp.ValidationErr = false
+			if err != nil {
+				// update the length field of the queue
+				err = updateLength()
+			}
 		case Get:
 			var data string
 			data, err = get(req.Index)
 			resp.Data = data
 		case Delete:
 			err = del(req.Index)
+		case Length:
+			var l int64
+			l, err = length()
+			resp.Length = l
 		}
 		if err != nil {
 			resp.Err = err.Error()
