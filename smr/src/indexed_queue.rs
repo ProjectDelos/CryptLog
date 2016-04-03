@@ -208,8 +208,14 @@ pub struct HttpClient {
     to_server: String,
 }
 
+impl Clone for HttpClient {
+    fn clone(&self) -> HttpClient {
+        HttpClient::new(&self.to_server)
+    }
+}
+
 impl HttpClient {
-    fn new(to_server: &str) -> HttpClient {
+    pub fn new(to_server: &str) -> HttpClient {
         return HttpClient {
             c: Client::new(),
             to_server: String::from(to_server),
@@ -272,16 +278,16 @@ impl IndexedQueue for HttpClient {
     }
 }
 
-
+#[derive(Clone)]
 pub struct DynamoQueue {
-    pub client: DynamoClient,
+    pub client: Arc<Mutex<DynamoClient>>,
     index: i64,
 }
 
 impl DynamoQueue {
     pub fn new() -> DynamoQueue {
         DynamoQueue {
-            client: DynamoClient::new(),
+            client: Arc::new(Mutex::new(DynamoClient::new())),
             index: 0,
         }
     }
@@ -292,7 +298,7 @@ impl IndexedQueue for DynamoQueue {
 
         let data = json::encode(&e).unwrap();
         loop {
-            match self.client.put(self.index, &data, true) {
+            match self.client.lock().unwrap().put(self.index, &data, true) {
                 Err(DynamoError::ValidationError(_)) => {
                     println!("validation error");
                     self.index += 1;
@@ -312,7 +318,7 @@ impl IndexedQueue for DynamoQueue {
               mut from: LogIndex,
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
-        let length = match self.client.length() {
+        let length = match self.client.lock().unwrap().length() {
             Err(_) => unimplemented!(),
             Ok(l) => l,
         };
@@ -326,7 +332,7 @@ impl IndexedQueue for DynamoQueue {
             if to.is_some() && from > to.unwrap() {
                 return rx;
             }
-            match self.client.get(from as i64) {
+            match self.client.lock().unwrap().get(from as i64) {
                 Ok(data) => {
                     let mut e: Entry = json::decode(&data).unwrap();
                     e.idx = Some(from);
