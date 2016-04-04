@@ -139,7 +139,12 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                         }
                         continue;
                     }
-
+                    // replicate entries to entry_callbacks
+                    for cb in self.entry_callbacks.iter_mut() {
+                        let e = e.clone();
+                        cb(e);
+                    }
+                    
                     for op in &e.operations {
                         // every operation is a write of sorts
                         *(self.version.get_mut(&op.obj_id).unwrap()) += 1;
@@ -164,11 +169,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                             }
                         }
                     }
-                    // replicate entries to entry_callbacks
-                    for cb in self.entry_callbacks.iter_mut() {
-                        let e = e.clone();
-                        cb(e);
-                    }
+
 
 
                     if same_idx {

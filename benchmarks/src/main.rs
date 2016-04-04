@@ -2,6 +2,7 @@ extern crate smr;
 extern crate rand;
 extern crate chan;
 extern crate crossbeam;
+extern crate time;
 
 use rand::Rng;
 use smr::maps::{StringBTMap, EncBTMap};
@@ -14,6 +15,7 @@ use std::collections::{BTreeMap};
 use std::thread;
 use std::time::Duration;
 use smr::http_server::HttpServer;
+use std::io::Write;
 
 // Need: to be able to create an indexed queue that is also clonable
 trait IndexedClonable: 'static+IndexedQueue+Clone+Send+Sync {}
@@ -48,8 +50,6 @@ enum Op<K, V> {
     Read(K),
 }
 
-use Op::*;
-
 fn start_vm<Q: 'static+IndexedClonable>(q: Q) -> VM<Q, MapSkiplist, AsyncSnapshotter> {
     let mut vm = VM::new(q, MapSkiplist::new(), AsyncSnapshotter::new());
     let id = 1 as ObjId;
@@ -69,30 +69,30 @@ fn gen_ops<K: Clone, V: Clone>(keys: &[K], values: &[V], n: i64, w: i64) -> Vec<
         let k = keys[rand::random::<usize>() % keys.len()].clone();
         let v = values[rand::random::<usize>() % values.len()].clone();
         if r <= w {
-            ops.push(Write(k, v));
+            ops.push(Op::Write(k, v));
         } else {
-            ops.push(Read(k));
+            ops.push(Op::Read(k));
         }
     }
     return ops;
 }
 
 
-fn bench<Q: IndexedClonable>(w: i64, n: i64, q: Q, encryptor: Option<MetaEncryptor>) {
-    let keys : Vec<String> = [1..10].into_iter().map(|_| {
+fn bench<Q: IndexedClonable>(mode: i64, w: i64, n: i64, nops: i64, q: Q, encryptor: Option<MetaEncryptor>) {
+    let keys : Vec<String> = [1..1000].into_iter().map(|_| {
         rand::thread_rng()
         .gen_ascii_chars()
         .take(10)
         .collect::<String>()
     }).collect();
-    let values : Vec<String> = [1..10].into_iter().map(|_| {
+    let values : Vec<String> = [1..1000].into_iter().map(|_| {
         rand::thread_rng()
         .gen_ascii_chars()
         .take(10)
         .collect::<String>()
     }).collect();
     let mut maps : Vec<_> = [0..n].into_iter().map(|_| {
-        let ops = gen_ops(&keys, &values, 10, w);
+        let ops = gen_ops(&keys, &values, nops, w);
         let runtime: Runtime<Q> = Runtime::new(q.clone(), encryptor.clone());
         let mut btmap = StringBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
         btmap.start();
@@ -105,58 +105,70 @@ fn bench<Q: IndexedClonable>(w: i64, n: i64, q: Q, encryptor: Option<MetaEncrypt
             let _ = recv.recv().unwrap();
             let _ : Vec<_> = ops.drain(..).map(|op| {
                 match op {
-                    Write(k, v) => {
+                    Op::Write(k, v) => {
                         map.insert(k, v);
                     }
-                    Read(k) => {
+                    Op::Read(k) => {
                         map.get(&k);
                     }
                 }
             }).collect();
         })
     });
+    let start = time::precise_time_ns();
     for _ in 0..n {
         send.send(());
     }
     let _ : Vec<_> = handles.map(|h| {
         h.join().unwrap();
     }).collect();
+    let end = time::precise_time_ns();
+    let mut stderr = std::io::stderr();
+    writeln!(&mut stderr, "{}, {}, {}, {}, {}, {}", mode, n, w, nops, end-start, (end-start)/(nops as u64)).unwrap();
 }
 
 fn main() {
-    for n in 1..3 {
-        for w in (1..10).map(|i| { i*10 }) {
+    let nops = 10000;
+    /*
+    Output:
+    Mode, N, W, Nops, Time, Time/Nops
+    */
+    for n in (1..3).map(|i| { 10.pow(i) }) {
+        for w in (1..3).map(|i| { i*30 }) {
             // first do an in memory shared queue
             {
                 println!("Benching: n={} w={}", n, w);
                 let mut q = SharedQueue::new_queue();
                 // no encryption
                 println!("No Encryption");
-                //bench::<SharedQueue>(w, n, q, None);
+                //bench::<SharedQueue>(0, w, n, q, None);
                 // homomorphic encryption
                 println!("Encryption: No VM");
                 q = SharedQueue::new_queue();
                 let encryptor = MetaEncryptor::new();
-                bench::<SharedQueue>(w, n, q, Some(encryptor));
+                bench::<SharedQueue>(1, w, n, nops, q, Some(encryptor));
                 // homomorphic encryption using the VM as the queue
 
                 println!("Encryption: With VM");
                 crossbeam::scope(|scope| {
                     let encryptor = MetaEncryptor::new();
-                    let server_addr = "127.0.0.1:6767";
-                    let to_server_addr = "http://127.0.0.1:6767";
-                    let (send, recv) = chan::sync(1);
+                    let server_addr = String::from("127.0.0.1:67")+&n.to_string()+&(w/10).to_string();
+                    let to_server_addr = String::from("http://127.0.0.1:67")+&n.to_string()+&(w/10).to_string();
+                    let (send, recv) = chan::sync(0);
+                    let (dsend, drecv) = chan::sync(0);
                     scope.spawn(move || {
                         let q = SharedQueue::new_queue();
                         let vm = start_vm(q);
                         let mut s = HttpServer::new(vm, &server_addr);
                         recv.recv().unwrap();
                         s.close();
+                        dsend.send(());
                     });
                     thread::sleep(Duration::from_millis(100));
                     let q = HttpClient::new(&to_server_addr);
-                    bench::<HttpClient>(w, n, q, Some(encryptor));
+                    bench::<HttpClient>(2, w, n, nops, q, Some(encryptor));
                     send.send(());
+                    drecv.recv().unwrap();
                 });
 
             }

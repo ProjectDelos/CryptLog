@@ -270,7 +270,8 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
         return vm;
     }
 
-    // start starts the vm streaming of the log
+    // start starts the vm streaming of the log: registers additions to local_queue as log_reader
+    // it has to be added to the local_queue before it is added to the skiplist though
     pub fn start(&mut self) {
         // Start constructing skip list.
         // Skip list stores all indices in the log for each entry.
@@ -292,13 +293,14 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
                 if (seen + 1) % 100 == 0 {
                     snapshotter.lock().unwrap().snapshot(idx);
                     // gc local queue
-                    let mut new_queue = HashMap::new();
+                    /*let mut new_queue = HashMap::new();
                     for (i, entry) in local_queue.drain() {
                         if i >= idx {
                             new_queue.insert(i, entry);
                         }
                     }
                     *local_queue = new_queue;
+                    */
                     // Leave 100 entries in case clients are reading from them
                     skiplist.lock().unwrap().gc(idx - 50);
                 }
@@ -373,6 +375,7 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
             if from <= snapshot.idx && (to.is_none() || snapshot.idx < to.unwrap()) {
                 new_from = snapshot.idx + 1; // all snapshots are guaranteed to have the same index
                 tx.send(LogSnapshot(snapshot)).unwrap();
+
             }
         }
         from = new_from;

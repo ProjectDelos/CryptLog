@@ -7,6 +7,7 @@ authors = ["dyv <dvisher1@gmail.com>"]
 rand = "^0.3"
 chan = "0.1.14"
 crossbeam = "0.2.8"
+time = "0.1"
 
 [dependencies.smr]
 path = "../smr"
