@@ -281,17 +281,29 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             let skiplist = self.skiplist.clone();
             let seen = seen.clone();
             let local_queue = self.local_queue.clone();
-            let vm_callback = Box::new(move |entry: Entry| {
-                // Lock the local_queue to ensure serialization here
-                let mut local_queue = local_queue.lock().unwrap();
-                let seen = seen.fetch_add(1, SeqCst);
-                let idx = entry.idx.unwrap();
+            let local_queue2 = self.local_queue.clone();
+            // The object callback adds it to the skiplist and the snapshot
 
-                // Add this entry to the local queue
+            // The local_queue should have the entry at the very beginning so it is always in there
+
+            // The number seen should be incremented at the end
+
+            // The snapshot should be done after adding it to the object
+            // The skiplist should be gc'd after everything is added
+
+            let pre_hook = Box::new(move |entry: Entry| {
+                let idx = entry.idx.unwrap();
+                let mut local_queue = local_queue.lock().unwrap();
                 local_queue.insert(idx, entry);
-                // Every once in a while take snapshots of all objects and gc
+            });
+
+            let post_hook = Box::new(move |entry: Entry| {
+                let idx = entry.idx.unwrap();
+                let seen = seen.fetch_add(1, SeqCst);
+                let mut local_queue = local_queue2.lock().unwrap();
                 if (seen + 1) % 100 == 0 {
                     snapshotter.lock().unwrap().snapshot(idx);
+                    skiplist.lock().unwrap().gc(idx - 50);
                     // gc local queue
                     /*let mut new_queue = HashMap::new();
                     for (i, entry) in local_queue.drain() {
@@ -299,13 +311,12 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
                             new_queue.insert(i, entry);
                         }
                     }
-                    *local_queue = new_queue;
-                    */
-                    // Leave 100 entries in case clients are reading from them
-                    skiplist.lock().unwrap().gc(idx - 50);
+                    *local_queue = new_queue;*/
                 }
             });
-            self.runtime.lock().unwrap().register_log_reader(vm_callback);
+
+            self.runtime.lock().unwrap().register_pre_callback(pre_hook);
+            self.runtime.lock().unwrap().register_post_callback(post_hook);
         }
 
         self.snapshots.lock().unwrap().start();
@@ -322,7 +333,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
                     return;
                 }
                 runtime.lock().unwrap().sync(None);
-                Duration::from_millis(4000);
+                Duration::from_millis(100);
             }
         }));
     }
@@ -346,7 +357,6 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             // Add this index to the skiplist
             skiplist.lock().unwrap().append(obj_id, idx);
             // Execute this entry on the snapshotter for this object
-
             snapshotter.lock().unwrap().exec(obj_id, idx, op.clone());
         });
         self.runtime.lock().unwrap().register_object(obj_id, cb);
@@ -375,7 +385,6 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
             if from <= snapshot.idx && (to.is_none() || snapshot.idx < to.unwrap()) {
                 new_from = snapshot.idx + 1; // all snapshots are guaranteed to have the same index
                 tx.send(LogSnapshot(snapshot)).unwrap();
-
             }
         }
         from = new_from;

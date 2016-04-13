@@ -14,7 +14,8 @@ pub struct Runtime<Q> {
     iq: Q,
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
-    entry_callbacks: Vec<Box<EntryCallback>>,
+    pre_callbacks: Vec<Box<EntryCallback>>,
+    post_callbacks: Vec<Box<EntryCallback>>,
     version: HashMap<ObjId, LogIndex>,
     pub global_idx: LogIndex,
     obj_ids: HashSet<ObjId>,
@@ -36,7 +37,8 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
 
             obj_ids: HashSet::new(),
             callbacks: HashMap::new(),
-            entry_callbacks: Vec::new(),
+            pre_callbacks: Vec::new(),
+            post_callbacks: Vec::new(),
             version: HashMap::new(),
             global_idx: -1 as LogIndex,
 
@@ -139,12 +141,13 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                         }
                         continue;
                     }
-                    // replicate entries to entry_callbacks
-                    for cb in self.entry_callbacks.iter_mut() {
+
+                    for cb in self.pre_callbacks.iter_mut() {
                         let e = e.clone();
                         cb(e);
                     }
-                    
+
+
                     for op in &e.operations {
                         // every operation is a write of sorts
                         *(self.version.get_mut(&op.obj_id).unwrap()) += 1;
@@ -170,7 +173,10 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                         }
                     }
 
-
+                    for cb in self.post_callbacks.iter_mut() {
+                        let e = e.clone();
+                        cb(e);
+                    }
 
                     if same_idx {
                         return e.tx_state.clone();
@@ -244,8 +250,11 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         }
         self.callbacks.get_mut(&obj_id).unwrap().push(c);
     }
-    pub fn register_log_reader(&mut self, c: Box<EntryCallback>) {
-        self.entry_callbacks.push(c);
+    pub fn register_pre_callback(&mut self, c: Box<EntryCallback>) {
+        self.pre_callbacks.push(c);
+    }
+    pub fn register_post_callback(&mut self, c: Box<EntryCallback>) {
+        self.post_callbacks.push(c);
     }
 }
 

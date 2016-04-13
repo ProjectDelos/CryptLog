@@ -684,11 +684,11 @@ mod test {
         }
         println!("DONE STREAMING");
         assert_eq!(read, n);
-        let mut client = q.client;
+        let client = q.client;
         // CLEAR OUT OLD ENTRIES
         println!("deleting old entries");
         for i in 0..n {
-            let _ = client.delete(i as i64);
+            let _ = client.lock().unwrap().delete(i as i64);
         }
     }
 

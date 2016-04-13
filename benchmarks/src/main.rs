@@ -193,8 +193,8 @@ fn main() {
     Output:
     Mode, N, W, Nops, Time, Time/Nops
     */
-    for n in (0..2).map(|i: i64| { (10 as i64).pow(i as u32) }) {
-        for w in (1..3).map(|i: i64| { i*30 }) {
+    for n in (0..3).map(|i: i64| { (10 as i64).pow(i as u32) }) {
+        for w in (1..4).map(|i: i64| { i*30 }) {
             // first do an in memory shared queue
             {
                 println!("Benching: n={} w={}", n, w);

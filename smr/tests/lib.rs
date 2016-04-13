@@ -161,7 +161,8 @@ fn register_integration_tests() {
         reg2.inc(2);
     }
     println!("Done writing to registers");
-
+    assert_eq!(reg1.read(), rounds);
+    assert_eq!(reg2.read(), rounds * 2);
     // check register values correctly read in new views
     // let mut reg1b = IntRegister::new(&aruntime, 1 as ObjId, 0);
     // reg1b.start();
@@ -171,7 +172,8 @@ fn register_integration_tests() {
     // assert_eq!(reg2b.read(), rounds * 2 + 1);
     // println!("Done reading registers");
     //
-
+    // wait for the VM to catch up
+    thread::sleep(Duration::from_millis(200));
     // check if registers can recover from the vm
     // this validates the snapshotting of the vm
     println!("Setting up VM as Register Runtime");
