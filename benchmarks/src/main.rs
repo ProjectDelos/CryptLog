@@ -1,3 +1,4 @@
+#![feature(const_fn)]
 extern crate smr;
 extern crate rand;
 extern crate chan;
@@ -15,7 +16,9 @@ use std::collections::{BTreeMap};
 use std::thread;
 use std::time::Duration;
 use smr::http_server::HttpServer;
-use std::io::Write;
+use std::io::Write;use std::sync::atomic::{AtomicUsize, Ordering};
+
+
 
 // Need: to be able to create an indexed queue that is also clonable
 trait IndexedClonable: 'static+IndexedQueue+Clone+Send+Sync {}
@@ -23,6 +26,7 @@ trait IndexedClonable: 'static+IndexedQueue+Clone+Send+Sync {}
 impl IndexedClonable for DynamoQueue {}
 impl IndexedClonable for SharedQueue {}
 impl IndexedClonable for HttpClient {}
+impl IndexedClonable for VM<SharedQueue, MapSkiplist, AsyncSnapshotter> {}
 
 // Simple trait that allows it to create a new IndexedClonable
 trait NewQueue<T: IndexedClonable> {
@@ -77,8 +81,28 @@ fn gen_ops<K: Clone, V: Clone>(keys: &[K], values: &[V], n: i64, w: i64) -> Vec<
     return ops;
 }
 
+struct BenchOpts {
+    mode: i64,
+    w: i64,
+    n: i64,
+    nops: i64,
+}
 
-fn bench<Q: IndexedClonable>(mode: i64, w: i64, n: i64, nops: i64, q: Q, encryptor: Option<MetaEncryptor>) {
+impl BenchOpts {
+    fn output_csv(&self, t: u64) {
+        let mut stderr = std::io::stderr();
+        writeln!(&mut stderr, "{}, {}, {}, {}, {}, {}", self.mode, self.n, self.w, self.nops, t, t/(self.nops as u64)).unwrap();
+    }
+}
+
+// bench_integration: benchmarks overall performance on a random read write load
+// mode: is 1 with shared Queue, 2 with VM as the queue (this is only for outputting the csv file)
+// w: is the number of writes per 100 operations
+// n: is the number of clients to create
+// nops: is the total number of operations
+// q: is the implementor of the shared queue
+// encryptor is the encryptor that is being used
+fn bench_integration<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Option<MetaEncryptor>) {
     let keys : Vec<String> = [1..1000].into_iter().map(|_| {
         rand::thread_rng()
         .gen_ascii_chars()
@@ -91,8 +115,8 @@ fn bench<Q: IndexedClonable>(mode: i64, w: i64, n: i64, nops: i64, q: Q, encrypt
         .take(10)
         .collect::<String>()
     }).collect();
-    let mut maps : Vec<_> = [0..n].into_iter().map(|_| {
-        let ops = gen_ops(&keys, &values, nops, w);
+    let mut maps : Vec<_> = [0..opts.n].into_iter().map(|_| {
+        let ops = gen_ops(&keys, &values, opts.nops, opts.w);
         let runtime: Runtime<Q> = Runtime::new(q.clone(), encryptor.clone());
         let mut btmap = StringBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
         btmap.start();
@@ -116,61 +140,79 @@ fn bench<Q: IndexedClonable>(mode: i64, w: i64, n: i64, nops: i64, q: Q, encrypt
         })
     });
     let start = time::precise_time_ns();
-    for _ in 0..n {
+    for _ in 0..opts.n {
         send.send(());
     }
     let _ : Vec<_> = handles.map(|h| {
         h.join().unwrap();
     }).collect();
     let end = time::precise_time_ns();
-    let mut stderr = std::io::stderr();
-    writeln!(&mut stderr, "{}, {}, {}, {}, {}, {}", mode, n, w, nops, end-start, (end-start)/(nops as u64)).unwrap();
+    opts.output_csv(end-start)
+}
+
+
+// PORT_NUM has to increment by 1 every time it is used so that every client and server run on a new server.
+static PORT_NUM: AtomicUsize = AtomicUsize::new(6666);
+// http_run runs the given queue as an http server with all the clients connecting to it
+fn http_run<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Option<MetaEncryptor>) {
+    let port = PORT_NUM.fetch_add(1, Ordering::SeqCst);
+    crossbeam::scope(|scope| {
+        println!("in crossbeam scope");
+        // create a unique server address
+        let server_addr = String::from("127.0.0.1:") + &port.to_string(); // &opts.n.to_string()+&(opts.w/10).to_string();
+        let to_server_addr = String::from("http://127.0.0.1:")+ &port.to_string(); // &opts.n.to_string()+&(opts.w/10).to_string();
+        println!("server addr: {}", server_addr);
+        let (send, recv) = chan::sync(0);
+        let (dsend, drecv) = chan::sync(0);
+        scope.spawn(move || {
+            let mut s = HttpServer::new(q, &server_addr);
+            println!("created http server");
+            recv.recv().unwrap();
+            s.close();
+            dsend.send(());
+        });
+        // wait for the server to start up
+        thread::sleep(Duration::from_millis(100));
+        // the new queue is the http client to the queue
+        println!("created http client");
+        let client = HttpClient::new(&to_server_addr);
+        println!("benching integration");
+        bench_integration::<HttpClient>(opts, client, encryptor);
+        println!("done with bench: shutting down");
+        send.send(());
+        println!("signal sent");
+        drecv.recv().unwrap();
+        println!("signal received");
+    });
+    println!("done running http_run");
 }
 
 fn main() {
-    let nops = 10000;
+    let nops = 1000;
     /*
     Output:
     Mode, N, W, Nops, Time, Time/Nops
     */
-    for n in (1..3).map(|i| { 10.pow(i) }) {
-        for w in (1..3).map(|i| { i*30 }) {
+    for n in (0..2).map(|i: i64| { (10 as i64).pow(i as u32) }) {
+        for w in (1..3).map(|i: i64| { i*30 }) {
             // first do an in memory shared queue
             {
                 println!("Benching: n={} w={}", n, w);
-                let mut q = SharedQueue::new_queue();
                 // no encryption
                 println!("No Encryption");
                 //bench::<SharedQueue>(0, w, n, q, None);
                 // homomorphic encryption
+
                 println!("Encryption: No VM");
-                q = SharedQueue::new_queue();
                 let encryptor = MetaEncryptor::new();
-                bench::<SharedQueue>(1, w, n, nops, q, Some(encryptor));
+                let q = SharedQueue::new_queue();
+                http_run(BenchOpts{mode: 1, w: w, n: n, nops: nops}, q, Some(encryptor));
+
+                let encryptor = MetaEncryptor::new();
+                let q = SharedQueue::new_queue();
+                let vm = start_vm(q);
+                http_run(BenchOpts{mode: 2, w: w, n: n, nops: nops}, vm, Some(encryptor));
                 // homomorphic encryption using the VM as the queue
-
-                println!("Encryption: With VM");
-                crossbeam::scope(|scope| {
-                    let encryptor = MetaEncryptor::new();
-                    let server_addr = String::from("127.0.0.1:67")+&n.to_string()+&(w/10).to_string();
-                    let to_server_addr = String::from("http://127.0.0.1:67")+&n.to_string()+&(w/10).to_string();
-                    let (send, recv) = chan::sync(0);
-                    let (dsend, drecv) = chan::sync(0);
-                    scope.spawn(move || {
-                        let q = SharedQueue::new_queue();
-                        let vm = start_vm(q);
-                        let mut s = HttpServer::new(vm, &server_addr);
-                        recv.recv().unwrap();
-                        s.close();
-                        dsend.send(());
-                    });
-                    thread::sleep(Duration::from_millis(100));
-                    let q = HttpClient::new(&to_server_addr);
-                    bench::<HttpClient>(2, w, n, nops, q, Some(encryptor));
-                    send.send(());
-                    drecv.recv().unwrap();
-                });
-
             }
             // Later transition to DynamoQueue
             // bench::<DynamoQueue, DynamoQueue>(w, n);
