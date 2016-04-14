@@ -6,7 +6,7 @@ extern crate crossbeam;
 extern crate time;
 
 use rand::Rng;
-use smr::maps::{StringBTMap, EncBTMap};
+use smr::maps::{StringBTMap, EncBTMap, UnencBTMap};
 use smr::runtime::Runtime;
 use smr::indexed_queue::{IndexedQueue, HttpClient, DynamoQueue, SharedQueue, ObjId};
 use std::sync::{Arc, Mutex};
@@ -95,6 +95,11 @@ impl BenchOpts {
     }
 }
 
+
+enum Map<Q> {
+    Unenc(UnencBTMap<Q>),
+    Enc(StringBTMap<Q>),
+}
 // bench_integration: benchmarks overall performance on a random read write load
 // mode: is 1 with shared Queue, 2 with VM as the queue (this is only for outputting the csv file)
 // w: is the number of writes per 100 operations
@@ -118,8 +123,16 @@ fn bench_integration<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Optio
     let mut maps : Vec<_> = [0..opts.n].into_iter().map(|_| {
         let ops = gen_ops(&keys, &values, opts.nops, opts.w);
         let runtime: Runtime<Q> = Runtime::new(q.clone(), encryptor.clone());
-        let mut btmap = StringBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
-        btmap.start();
+
+        let mut btmap = if opts.mode == 0 {
+            let mut map = UnencBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
+            map.start();
+            Map::Unenc(map)
+        } else {
+            let mut map = StringBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
+            map.start();
+            Map::Enc(map)
+        };
         (btmap, ops)
     }).collect();
     let (send, recv) = chan::async();
@@ -130,10 +143,25 @@ fn bench_integration<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Optio
             let _ : Vec<_> = ops.drain(..).map(|op| {
                 match op {
                     Op::Write(k, v) => {
-                        map.insert(k, v);
+                        match map {
+                            Map::Enc(ref mut map) => {
+                                map.insert(k, v);
+                            }
+                            Map::Unenc(ref mut map) => {
+                                map.insert(k, v);
+                            }
+                        }
+
                     }
                     Op::Read(k) => {
-                        map.get(&k);
+                        match map {
+                            Map::Enc(ref mut map) => {
+                                map.get(&k);
+                            }
+                            Map::Unenc(ref mut map) => {
+                                map.get(&k);
+                            }
+                        }
                     }
                 }
             }).collect();
@@ -200,8 +228,9 @@ fn main() {
                 println!("Benching: n={} w={}", n, w);
                 // no encryption
                 println!("No Encryption");
-                //bench::<SharedQueue>(0, w, n, q, None);
-                // homomorphic encryption
+                let encryptor = MetaEncryptor::new();
+                let q = SharedQueue::new_queue();
+                http_run(BenchOpts{mode: 0, w: w, n: n, nops: nops}, q, Some(encryptor));
 
                 println!("Encryption: No VM");
                 let encryptor = MetaEncryptor::new();

@@ -436,7 +436,7 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
     }
 
     pub fn insert(&mut self, k: K, v: V) {
-        println!("map.insert debug k {:?}, v{:?}", k, v);
+        // println!("map.insert debug k {:?}, v{:?}", k, v);
         self.with_runtime::<(), _, _>(|mut runtime| {
             let key = self.convert_ord
                           .as_ref()
@@ -452,7 +452,7 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
                               to(&self.secure, v)
                           })
                           .unwrap();
-            println!("map.insert key = {:?}, val {:?}", key, val);
+            // println!("map.insert key = {:?}, val {:?}", key, val);
             let encrypted_op = MapOp::Insert {
                 key: key,
                 val: val,
