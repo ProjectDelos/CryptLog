@@ -82,6 +82,10 @@ impl ConvertersLib {
 
     }
 
+    fn m_encodable_from_encodable<E: Encodable + Decodable>(_: &Option<MetaEncryptor>, e: E) -> E {
+        e
+    }
+
     fn m_encrypted_from_encrypted(_: &Option<MetaEncryptor>, e: Encrypted) -> Encrypted {
         e
     }
@@ -162,6 +166,13 @@ impl ConvertersLib {
         -> Box<Fn(&Option<MetaEncryptor>, Eqable) -> E + Send + Sync>
     {
         Box::new(ConvertersLib::m_encodable_from_eqable)
+    }
+
+    pub fn encodable_from_encodable<E: 'static + Encodable + Decodable>
+        ()
+        -> Box<Fn(&Option<MetaEncryptor>, E) -> E + Send + Sync>
+    {
+        Box::new(ConvertersLib::m_encodable_from_encodable)
     }
 
     pub fn encrypted_from_encrypted
@@ -254,9 +265,31 @@ impl<T> Converter<T> {
     }
 }
 
+
+#[derive(Clone)]
+pub struct SimpleConverter<T, P> {
+    pub from: Arc<Box<Fn(&Option<MetaEncryptor>, P) -> T + Send + Sync>>,
+    pub to: Arc<Box<Fn(&Option<MetaEncryptor>, T) -> P + Send + Sync>>,
+}
+
+impl<T, P> SimpleConverter<T, P> {
+    pub fn new(from: Box<Fn(&Option<MetaEncryptor>, P) -> T + Send + Sync>,
+               to: Box<Fn(&Option<MetaEncryptor>, T) -> P + Send + Sync>)
+               -> SimpleConverter<T, P> {
+        SimpleConverter {
+            from: Arc::new(from),
+            to: Arc::new(to),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use super::{ConvertersLib, AddableConverter, EqableConverter, OrdableConverter, Converter};
+    extern crate rustc_serialize;
+    use self::rustc_serialize::{Encodable, Decodable};
+    use super::{ConvertersLib, AddableConverter, EqableConverter, OrdableConverter, Converter,
+                SimpleConverter};
+    use encryptors::{MetaEncryptor, Addable, Eqable, Ordable, Encrypted, Int};
 
     #[test]
     fn create_addable_converter() {
@@ -285,6 +318,22 @@ mod test {
     fn create_converter() {
         let _: Converter<String> = Converter::new(ConvertersLib::encodable_from_encrypted(),
                                                   ConvertersLib::encrypted_from_encodable());
+
+    }
+
+    #[test]
+    fn simple_converter() {
+        let _: SimpleConverter<String, Encrypted> =
+            SimpleConverter::new(ConvertersLib::encodable_from_encrypted(),
+                                 ConvertersLib::encrypted_from_encodable());
+
+    }
+
+    #[test]
+    fn simple_ident_converter() {
+        let _: SimpleConverter<String, String> =
+            SimpleConverter::new(ConvertersLib::encodable_from_encodable(),
+                                 ConvertersLib::encodable_from_encodable());
 
     }
 }

@@ -4,7 +4,7 @@ extern crate rustc_serialize;
 use self::rustc_serialize::json;
 
 use smr::ds::{IntRegister, AddableRegister};
-use smr::maps::{StringBTMap, EncBTMap, StringHMap, EncHMap};
+use smr::maps::{UnencBTMap, StringBTMap, EncBTMap, StringHMap, EncHMap};
 use smr::runtime::Runtime;
 use smr::indexed_queue::{SharedQueue, ObjId, LogData};
 use std::sync::{Arc, Mutex};
@@ -216,13 +216,13 @@ fn btmap_integration_tests() {
     let encryptor = MetaEncryptor::new();
     // SETUP VM
     let mut vm = VM::new(q.clone(), MapSkiplist::new(), AsyncSnapshotter::new());
-    let vm_map1 = EncBTMap::new(&vm.runtime, 1 as ObjId, BTreeMap::new());
+    let vm_map1 = UnencBTMap::new(&vm.runtime, 1 as ObjId, BTreeMap::new());
     let mut vm_map1_copy = vm_map1.clone();
     vm.register_object(1 as ObjId,
                        Box::new(move |_, e| vm_map1_copy.callback(e)),
                        vm_map1.clone());
 
-    let vm_map2 = EncBTMap::new(&vm.runtime, 2 as ObjId, BTreeMap::new());
+    let vm_map2 = UnencBTMap::new(&vm.runtime, 2 as ObjId, BTreeMap::new());
     let mut vm_map2_copy = vm_map2.clone();
     vm.register_object(2 as ObjId,
                        Box::new(move |_, e| vm_map2_copy.callback(e)),
@@ -234,8 +234,8 @@ fn btmap_integration_tests() {
     let runtime: Runtime<SharedQueue> = Runtime::new(q.clone(), Some(encryptor.clone()));
     let aruntime = Arc::new(Mutex::new(runtime));
 
-    let mut btmap1 = StringBTMap::new(&aruntime, 1 as ObjId, BTreeMap::new());
-    let mut btmap2 = StringBTMap::new(&aruntime, 2 as ObjId, BTreeMap::new());
+    let mut btmap1 = UnencBTMap::new(&aruntime, 1 as ObjId, BTreeMap::new());
+    let mut btmap2 = UnencBTMap::new(&aruntime, 2 as ObjId, BTreeMap::new());
     btmap1.start();
     btmap2.start();
 
@@ -267,11 +267,12 @@ fn btmap_integration_tests() {
     println!("Setting up VM as BTMap Runtime");
     let meta_runtime = Runtime::new(vm, Some(encryptor));
     let a_meta_runtime = Arc::new(Mutex::new(meta_runtime));
-    let mut meta_btmap1 = StringBTMap::new(&a_meta_runtime, 1 as ObjId, BTreeMap::new());
-    let mut meta_btmap2 = StringBTMap::new(&a_meta_runtime, 2 as ObjId, BTreeMap::new());
+    let mut meta_btmap1 = UnencBTMap::new(&a_meta_runtime, 1 as ObjId, BTreeMap::new());
+    let mut meta_btmap2 = UnencBTMap::new(&a_meta_runtime, 2 as ObjId, BTreeMap::new());
     println!("Starting VM BTMaps");
     meta_btmap1.start();
     meta_btmap2.start();
+    thread::sleep(Duration::from_secs(1));
 
     println!("READING VALUES");
     // Read values (should come from snapshots)
@@ -279,9 +280,11 @@ fn btmap_integration_tests() {
         println!("reading 1: {}", i);
         let (_, val) = meta_btmap1.pop_first().expect("pop_first meta_btmap1");
         println!("found {} =?= {}", val, vals[should_be_at[i]]);
+
         println!("reading 2: {}", i);
         let (_, val2) = meta_btmap2.pop_first().expect("pop_fist meta_btmap2");
         println!("found {} =?= {}", val2, vals2[should_be_at[i]]);
+
         // println!("key {:?} val {:?}", key, val);
         assert_eq!(val, vals[should_be_at[i]]);
         assert_eq!(val2, vals2[should_be_at[i]]);

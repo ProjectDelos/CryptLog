@@ -5,8 +5,9 @@ use self::rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
 use runtime::Runtime;
 use indexed_queue::{Operation, IndexedQueue, State, LogOp};
 use encryptors::{MetaEncryptor, Encrypted, Eqable, Ordable};
-use converters::{Converter, EqableConverter, OrdableConverter, ConvertersLib};
+use converters::{SimpleConverter, Converter, EqableConverter, OrdableConverter, ConvertersLib};
 
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::collections::{HashMap, BTreeMap};
 use std::hash::Hash;
@@ -236,7 +237,7 @@ impl<K, V, Q> HMap<K, V, Q>
     }
 }
 
-pub type StringBTMap<Q> = BTMap<String, String, Q>;
+pub type StringBTMap<Q> = BTMap<String, String, Q, Ordable, Encrypted>;
 impl<Q> StringBTMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
                obj_id: i32,
@@ -245,14 +246,14 @@ impl<Q> StringBTMap<Q> {
         BTMap::from(aruntime,
                     obj_id,
                     data,
-                    Converter::new(ConvertersLib::encodable_from_encrypted(),
-                                   ConvertersLib::encrypted_from_encodable()),
-                    OrdableConverter::new(ConvertersLib::encodable_from_ordable(),
-                                          ConvertersLib::ordable_from_encodable()))
+                    SimpleConverter::new(ConvertersLib::encodable_from_encrypted(),
+                                         ConvertersLib::encrypted_from_encodable()),
+                    SimpleConverter::new(ConvertersLib::encodable_from_ordable(),
+                                         ConvertersLib::ordable_from_encodable()))
     }
 }
 
-pub type EncBTMap<Q> = BTMap<Ordable, Encrypted, Q>;
+pub type EncBTMap<Q> = BTMap<Ordable, Encrypted, Q, Ordable, Encrypted>;
 impl<Q> EncBTMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
                obj_id: i32,
@@ -261,40 +262,61 @@ impl<Q> EncBTMap<Q> {
         BTMap::from(aruntime,
                     obj_id,
                     data,
-                    Converter::new(ConvertersLib::encrypted_from_encrypted(),
-                                   ConvertersLib::encrypted_from_encrypted()),
-                    OrdableConverter::new(ConvertersLib::ordable_from_ordable(),
-                                          ConvertersLib::ordable_from_ordable()))
+                    SimpleConverter::new(ConvertersLib::encrypted_from_encrypted(),
+                                         ConvertersLib::encrypted_from_encrypted()),
+                    SimpleConverter::new(ConvertersLib::ordable_from_ordable(),
+                                         ConvertersLib::ordable_from_ordable()))
     }
 }
 
+pub type UnencBTMap<Q> = BTMap<String, String, Q, String, String>;
+impl<Q> UnencBTMap<Q> {
+    pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
+               obj_id: i32,
+               data: BTreeMap<String, String>)
+               -> UnencBTMap<Q> {
+        BTMap::from(aruntime,
+                    obj_id,
+                    data,
+                    SimpleConverter::new(ConvertersLib::encodable_from_encodable(),
+                                         ConvertersLib::encodable_from_encodable()),
+                    SimpleConverter::new(ConvertersLib::encodable_from_encodable(),
+                                         ConvertersLib::encodable_from_encodable()))
+    }
+}
+
+
 #[derive(Clone)]
-pub struct BTMap<K, V, Q> {
+pub struct BTMap<K, V, Q, KE, VE> {
     runtime: Option<Arc<Mutex<Runtime<Q>>>>,
     obj_id: i32,
 
-    convert_ord: Option<OrdableConverter<K>>,
-    convert: Option<Converter<V>>,
+    convert_ord: Option<SimpleConverter<K, KE>>,
+    convert: Option<SimpleConverter<V, VE>>,
 
     secure: Option<MetaEncryptor>,
     pub data: Arc<Mutex<BTreeMap<K, V>>>,
 }
 
-impl<K, V, Q> Decodable for BTMap<K, V, Q>
+impl<K, V, Q, KE, VE> Decodable for BTMap<K, V, Q, KE, VE>
     where K: Encodable + Decodable + Ord,
-          V: Encodable + Decodable
+          V: Encodable + Decodable,
+          KE: Encodable + Decodable + Ord,
+          VE: Encodable + Decodable
 {
     fn decode<D: Decoder>(d: &mut D) -> Result<Self, D::Error> {
         let data = try!(Decodable::decode(d));
-        let btmap: BTMap<K, V, Q> = BTMap::default(data);
+        let btmap: BTMap<K, V, Q, KE, VE> = BTMap::default(data);
         let res: Result<Self, D::Error> = Ok(btmap);
         return res;
     }
 }
 
-impl<K, V, Q> Encodable for BTMap<K, V, Q>
+impl<K, V, Q, KE, VE> Encodable for BTMap<K, V, Q, KE, VE>
     where K: Encodable + Decodable + Ord,
-          V: Encodable + Decodable
+          V: Encodable + Decodable,
+          KE: Encodable + Decodable + Ord,
+          VE: Encodable + Decodable
 {
     fn encode<S: Encoder>(&self, s: &mut S) -> Result<(), S::Error> {
         let data = self.data.lock().unwrap();
@@ -302,13 +324,13 @@ impl<K, V, Q> Encodable for BTMap<K, V, Q>
     }
 }
 
-impl<K, V, Q> BTMap<K, V, Q> {
+impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE> {
     pub fn from(aruntime: &Arc<Mutex<Runtime<Q>>>,
                 obj_id: i32,
                 data: BTreeMap<K, V>,
-                convert: Converter<V>,
-                convert_ord: OrdableConverter<K>)
-                -> BTMap<K, V, Q> {
+                convert: SimpleConverter<V, VE>,
+                convert_ord: SimpleConverter<K, KE>)
+                -> BTMap<K, V, Q, KE, VE> {
         let btmap = BTMap {
             obj_id: obj_id,
             runtime: Some(aruntime.clone()),
@@ -320,7 +342,7 @@ impl<K, V, Q> BTMap<K, V, Q> {
         return btmap;
     }
 
-    fn default(data: BTreeMap<K, V>) -> BTMap<K, V, Q> {
+    fn default(data: BTreeMap<K, V>) -> BTMap<K, V, Q, KE, VE> {
         BTMap {
             obj_id: 0,
             runtime: None,
@@ -332,10 +354,12 @@ impl<K, V, Q> BTMap<K, V, Q> {
     }
 }
 
-impl<K, V, Q> BTMap<K, V, Q>
-    where K: 'static + Ord + Send + Clone + Encodable + Decodable,
-          V: 'static + Send + Clone + Encodable + Decodable,
-          Q: 'static + IndexedQueue + Send + Clone
+impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
+    where K: 'static + Ord + Send + Clone + Encodable + Decodable + Debug,
+          V: 'static + Send + Clone + Encodable + Decodable + Debug,
+          Q: 'static + IndexedQueue + Send + Clone,
+          KE: 'static + Ord + Send + Clone + Encodable + Decodable + Debug,
+          VE: 'static + Send + Clone + Encodable + Decodable + Debug
 {
     fn with_runtime<R, T, F>(&self, f: F) -> T
         where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
@@ -391,7 +415,7 @@ impl<K, V, Q> BTMap<K, V, Q>
         })
     }
 
-    pub fn get_val(&self, val: Encrypted) -> V {
+    pub fn get_val(&self, val: VE) -> V {
         self.convert
             .as_ref()
             .map(|convert| {
@@ -401,7 +425,7 @@ impl<K, V, Q> BTMap<K, V, Q>
             .unwrap()
     }
 
-    pub fn get_key(&self, key: Ordable) -> K {
+    pub fn get_key(&self, key: KE) -> K {
         self.convert_ord
             .as_ref()
             .map(|convert_ord| {
@@ -412,6 +436,7 @@ impl<K, V, Q> BTMap<K, V, Q>
     }
 
     pub fn insert(&mut self, k: K, v: V) {
+        println!("map.insert debug k {:?}, v{:?}", k, v);
         self.with_runtime::<(), _, _>(|mut runtime| {
             let key = self.convert_ord
                           .as_ref()
@@ -427,6 +452,7 @@ impl<K, V, Q> BTMap<K, V, Q>
                               to(&self.secure, v)
                           })
                           .unwrap();
+            println!("map.insert key = {:?}, val {:?}", key, val);
             let encrypted_op = MapOp::Insert {
                 key: key,
                 val: val,
@@ -450,7 +476,7 @@ impl<K, V, Q> BTMap<K, V, Q>
                 }
             }
             LogOp::Snapshot(State::Encoded(ref s)) => {
-                let mut obj: BTreeMap<Ordable, Encrypted> = json::decode(&s).unwrap();
+                let mut obj: BTreeMap<KE, VE> = json::decode(&s).unwrap();
                 let mut converted = BTreeMap::new();
                 for (k, v) in obj.iter_mut() {
                     converted.insert(self.get_key(k.clone()), self.get_val(v.clone()));
@@ -466,7 +492,7 @@ impl<K, V, Q> BTMap<K, V, Q>
 
 #[cfg(test)]
 mod test {
-    use super::{StringHMap, StringBTMap};
+    use super::{StringHMap, StringBTMap, UnencBTMap};
     use std::collections::{HashMap, BTreeMap};
     use std::char;
     use std::sync::{Arc, Mutex};
@@ -482,12 +508,10 @@ mod test {
         let aruntime = Arc::new(Mutex::new(runtime));
         let n = 5;
         let obj_id = 1;
-        let _: Converter<String> =
-            Converter::new(ConvertersLib::encodable_from_encrypted(),
-                           ConvertersLib::encrypted_from_encodable());
-        let _: EqableConverter<i32> =
-            EqableConverter::new(ConvertersLib::encodable_from_eqable(),
-                                 ConvertersLib::eqable_from_encodable());
+        let _: Converter<String> = Converter::new(ConvertersLib::encodable_from_encrypted(),
+                                                  ConvertersLib::encrypted_from_encodable());
+        let _: EqableConverter<i32> = EqableConverter::new(ConvertersLib::encodable_from_eqable(),
+                                                           ConvertersLib::eqable_from_encodable());
         let mut hmap = StringHMap::new(&aruntime, obj_id, HashMap::new());
         hmap.start();
 
@@ -514,6 +538,39 @@ mod test {
         let n = 5;
         let obj_id = 1;
         let mut btmap = StringBTMap::new(&aruntime, obj_id, BTreeMap::new());
+        btmap.start();
+
+        let keys = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
+        let vals = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
+        let should_be_at = vec![3, 0, 4, 1, 2];
+        for i in 0..keys.len() {
+            btmap.insert(String::from(keys[i].clone()), String::from(vals[i].clone()));
+            assert_eq!(vals[i], btmap.get(&String::from(keys[i])).unwrap());
+        }
+
+        assert!(btmap.runtime.is_some(), "invalid runtime");
+        btmap.runtime = btmap.runtime
+                             .map(|runtime| {
+                                 assert_eq!(runtime.lock().unwrap().global_idx, (n - 1) as i64);
+                                 runtime
+                             });
+
+        for i in 0..keys.len() {
+            let (_, val) = btmap.pop_first().unwrap();
+            // println!("key {:?} val {:?}", key, val);
+            assert_eq!(val, vals[should_be_at[i]]);
+        }
+
+    }
+
+    #[test]
+    fn btmap_unec() {
+        let q = InMemoryQueue::new();
+        let runtime: Runtime<InMemoryQueue> = Runtime::new(q, Some(MetaEncryptor::new()));
+        let aruntime = Arc::new(Mutex::new(runtime));
+        let n = 5;
+        let obj_id = 1;
+        let mut btmap = UnencBTMap::new(&aruntime, obj_id, BTreeMap::new());
         btmap.start();
 
         let keys = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
