@@ -2,10 +2,13 @@ extern crate serde;
 extern crate serde_json;
 extern crate rustc_serialize;
 extern crate hyper;
+extern crate rand;
 
 use std::collections::{VecDeque, HashSet, HashMap};
 use std::sync::{Mutex, Arc};
 use std::sync::mpsc;
+use std::time::Duration;
+use std::thread;
 
 use self::hyper::Client;
 // use self::hyper::client::response::Response;
@@ -203,14 +206,112 @@ impl IndexedQueue for SharedQueue {
     }
 }
 
+fn randomize(x: u64, n: u64, d: u64) -> u64 {
+    //println!("{} {} {}", x, n, d);
+    if x == 0 {
+        return x;
+    }
+    let m : i64 = (x*n/d) as i64;
+    if m == 0 {
+        return x;
+    }
+    //println!("{}", m);
+    let r = (rand::random::<i32>() as i64) % (m*2);
+    let diff = r - m;
+    // +/- 50%
+    let out = ((x as i64) + diff) as u64;
+    //println!("{}", out);
+    out
+}
+
+// TODO Create Contended Queue
+#[derive(Clone)]
+pub struct ContendedQueue {
+    h: Arc<Mutex<HashMap<LogIndex, Entry>>>,
+    delay: u64, // point-to-point time estimate (not round-trip)
+}
+
+impl ContendedQueue {
+    pub fn new(delay_ms: u64) -> ContendedQueue {
+        ContendedQueue {
+            h: Arc::new(Mutex::new(HashMap::new())),
+            delay: randomize(delay_ms, 1, 2),
+        }
+    }
+    fn sleep(&self) {
+        thread::sleep(Duration::from_millis(randomize(self.delay, 1, 4)));
+    }
+}
+
+impl IndexedQueue for ContendedQueue {
+    fn append(&mut self, e: Entry) -> LogIndex {
+        self.sleep();
+        let len = {
+            let h = self.h.lock().unwrap();
+            h.len()
+        };
+        self.sleep();
+        loop {
+            self.sleep();
+            let done = {
+                let mut h = self.h.lock().unwrap();
+                let done = h.len() == len;
+                if done {
+                    h.insert(len as LogIndex, e.clone());
+                }
+                done
+            };
+            self.sleep();
+            if done {
+                return len as LogIndex;
+            }
+        }
+    }
+    fn stream(&mut self,
+              obj_ids: &HashSet<ObjId>,
+              mut from: LogIndex,
+              to: Option<LogIndex>)
+              -> mpsc::Receiver<LogData> {
+        self.sleep();
+        let len = {
+            let h = self.h.lock().unwrap();
+            h.len() as i64
+        };
+        self.sleep();
+        use self::LogData::LogEntry;
+        let (tx, rx) = mpsc::channel();
+        loop {
+            if from >= len {
+                return rx;
+            }
+            if to.is_some() && from > to.unwrap() {
+                return rx;
+            }
+            self.sleep();
+            {
+                let h = self.h.lock().unwrap();
+                let e = h[&from].clone();
+                if e.writes.is_disjoint(&obj_ids) {
+                    // entry relevant to some obj_ids
+                    tx.send(LogEntry(e)).unwrap();
+                }
+            }
+            self.sleep();
+            from += 1;
+        }
+    }
+}
+
+
 pub struct HttpClient {
     c: Client,
     to_server: String,
+    delay: Duration,
 }
 
 impl Clone for HttpClient {
     fn clone(&self) -> HttpClient {
-        HttpClient::new(&self.to_server)
+        HttpClient::with_delay(&self.to_server, self.delay)
     }
 }
 
@@ -219,6 +320,14 @@ impl HttpClient {
         return HttpClient {
             c: Client::new(),
             to_server: String::from(to_server),
+            delay: Duration::new(0, 0),
+        };
+    }
+    pub fn with_delay(to_server: &str, delay: Duration) -> HttpClient {
+        return HttpClient {
+            c: Client::new(),
+            to_server: String::from(to_server),
+            delay: delay,
         };
     }
 
@@ -234,6 +343,7 @@ impl IndexedQueue for HttpClient {
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
         let body = json::encode(&HttpRequest::Stream(obj_ids.clone(), from, to)).unwrap();
+        thread::sleep(self.delay);
         let mut http_resp = self.c
                                 .post(&self.to_server)
                                 .header(Connection::keep_alive())
@@ -241,6 +351,7 @@ impl IndexedQueue for HttpClient {
                                 .send()
                                 .unwrap();
 
+        thread::sleep(self.delay);
         let (tx, rx) = mpsc::channel();
         let mut resp = String::new();
         http_resp.read_to_string(&mut resp).unwrap();
@@ -260,12 +371,14 @@ impl IndexedQueue for HttpClient {
         // let e = json::encode(&e).unwrap();
         let e = HttpRequest::Append(e);
         let body = json::encode(&e).unwrap();
+        thread::sleep(self.delay);
         let mut http_resp = self.c
                                 .post(&self.to_server)
                                 .header(Connection::keep_alive())
                                 .body(&body)
                                 .send()
                                 .unwrap();
+        thread::sleep(self.delay);
         let mut resp = String::new();
         http_resp.read_to_string(&mut resp).unwrap();
         let resp = json::decode(&resp).unwrap();

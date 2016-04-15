@@ -5,7 +5,7 @@ use self::rustc_serialize::{Encodable, Decodable, Encoder, Decoder};
 use runtime::Runtime;
 use indexed_queue::{Operation, IndexedQueue, State, LogOp};
 use encryptors::{MetaEncryptor, Encrypted, Eqable, Ordable};
-use converters::{SimpleConverter, Converter, EqableConverter, OrdableConverter, ConvertersLib};
+use converters::{SimpleConverter, Converter, EqableConverter, ConvertersLib};
 
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex, MutexGuard};

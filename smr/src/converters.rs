@@ -23,7 +23,7 @@ impl ConvertersLib {
             &Some(ref secure) => {
                 match secure.decrypt_ahe::<i32>(a) {
                     Ok(data) => data,
-                    Err(e) => panic!("error decrypting {}", e), 
+                    Err(e) => panic!("error decrypting {}", e),
                 }
             }
             &None => panic!("no secure given"),
@@ -286,10 +286,9 @@ impl<T, P> SimpleConverter<T, P> {
 #[cfg(test)]
 mod test {
     extern crate rustc_serialize;
-    use self::rustc_serialize::{Encodable, Decodable};
     use super::{ConvertersLib, AddableConverter, EqableConverter, OrdableConverter, Converter,
                 SimpleConverter};
-    use encryptors::{MetaEncryptor, Addable, Eqable, Ordable, Encrypted, Int};
+    use encryptors::{Encrypted};
 
     #[test]
     fn create_addable_converter() {

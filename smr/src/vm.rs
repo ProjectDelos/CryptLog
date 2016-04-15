@@ -281,7 +281,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             let skiplist = self.skiplist.clone();
             let seen = seen.clone();
             let local_queue = self.local_queue.clone();
-            let local_queue2 = self.local_queue.clone();
+            //let local_queue2 = self.local_queue.clone();
             // The object callback adds it to the skiplist and the snapshot
 
             // The local_queue should have the entry at the very beginning so it is always in there
@@ -300,8 +300,8 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             let post_hook = Box::new(move |entry: Entry| {
                 let idx = entry.idx.unwrap();
                 let seen = seen.fetch_add(1, SeqCst);
-                let mut local_queue = local_queue2.lock().unwrap();
-                if (seen + 1) % 100 == 0 {
+                //let local_queue = local_queue2.lock().unwrap();
+                if (seen + 1) % 1000 == 0 {
                     snapshotter.lock().unwrap().snapshot(idx);
                     skiplist.lock().unwrap().gc(idx - 50);
                     // gc local queue
@@ -333,7 +333,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
                     return;
                 }
                 runtime.lock().unwrap().sync(None);
-                Duration::from_millis(100);
+                Duration::from_millis(1000);
             }
         }));
     }

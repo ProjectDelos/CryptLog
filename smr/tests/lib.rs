@@ -4,7 +4,7 @@ extern crate rustc_serialize;
 use self::rustc_serialize::json;
 
 use smr::ds::{IntRegister, AddableRegister};
-use smr::maps::{UnencBTMap, StringBTMap, EncBTMap, StringHMap, EncHMap};
+use smr::maps::{UnencBTMap, EncBTMap, StringHMap, EncHMap};
 use smr::runtime::Runtime;
 use smr::indexed_queue::{SharedQueue, ObjId, LogData};
 use std::sync::{Arc, Mutex};

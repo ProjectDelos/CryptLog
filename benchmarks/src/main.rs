@@ -8,7 +8,7 @@ extern crate time;
 use rand::Rng;
 use smr::maps::{StringBTMap, EncBTMap, UnencBTMap};
 use smr::runtime::Runtime;
-use smr::indexed_queue::{IndexedQueue, HttpClient, DynamoQueue, SharedQueue, ObjId};
+use smr::indexed_queue::{IndexedQueue, ContendedQueue, HttpClient, DynamoQueue, SharedQueue, ObjId};
 use std::sync::{Arc, Mutex};
 use smr::vm::{VM, MapSkiplist, Snapshotter, AsyncSnapshotter};
 use smr::encryptors::{MetaEncryptor};
@@ -26,7 +26,9 @@ trait IndexedClonable: 'static+IndexedQueue+Clone+Send+Sync {}
 impl IndexedClonable for DynamoQueue {}
 impl IndexedClonable for SharedQueue {}
 impl IndexedClonable for HttpClient {}
+impl IndexedClonable for ContendedQueue {}
 impl IndexedClonable for VM<SharedQueue, MapSkiplist, AsyncSnapshotter> {}
+impl IndexedClonable for VM<ContendedQueue, MapSkiplist, AsyncSnapshotter> {}
 
 // Simple trait that allows it to create a new IndexedClonable
 trait NewQueue<T: IndexedClonable> {
@@ -69,10 +71,10 @@ fn start_vm<Q: 'static+IndexedClonable>(q: Q) -> VM<Q, MapSkiplist, AsyncSnapsho
 fn gen_ops<K: Clone, V: Clone>(keys: &[K], values: &[V], n: i64, w: i64) -> Vec<Op<K,V>> {
     let mut ops : Vec<Op<K, V>> = Vec::with_capacity(n as usize);
     for _ in 0..n {
-        let r = rand::random::<i64>() % 100;
+        let r = rand::random::<i64>() % 1000;
         let k = keys[rand::random::<usize>() % keys.len()].clone();
         let v = values[rand::random::<usize>() % values.len()].clone();
-        if r <= w {
+        if r < w {
             ops.push(Op::Write(k, v));
         } else {
             ops.push(Op::Read(k));
@@ -216,29 +218,29 @@ fn http_run<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Option<MetaEnc
 }
 
 fn main() {
-    let nops = 1000;
+    let nops = 150;
     /*
     Output:
     Mode, N, W, Nops, Time, Time/Nops
     */
-    for n in (0..3).map(|i: i64| { (10 as i64).pow(i as u32) }) {
-        for w in (1..4).map(|i: i64| { i*30 }) {
+    for n in vec![1, 2, 4, 16, 64] {
+        for w in vec![1, 5, 10, 50, 100] {
             // first do an in memory shared queue
             {
                 println!("Benching: n={} w={}", n, w);
                 // no encryption
                 println!("No Encryption");
                 let encryptor = MetaEncryptor::new();
-                let q = SharedQueue::new_queue();
-                http_run(BenchOpts{mode: 0, w: w, n: n, nops: nops}, q, Some(encryptor));
+                let q = ContendedQueue::new(10);
+                bench_integration(BenchOpts{mode: 0, w: w, n: n, nops: nops}, q, Some(encryptor));
 
                 println!("Encryption: No VM");
                 let encryptor = MetaEncryptor::new();
-                let q = SharedQueue::new_queue();
-                http_run(BenchOpts{mode: 1, w: w, n: n, nops: nops}, q, Some(encryptor));
+                let q = ContendedQueue::new(10);
+                bench_integration(BenchOpts{mode: 1, w: w, n: n, nops: nops}, q, Some(encryptor));
 
                 let encryptor = MetaEncryptor::new();
-                let q = SharedQueue::new_queue();
+                let q = ContendedQueue::new(10);
                 let vm = start_vm(q);
                 http_run(BenchOpts{mode: 2, w: w, n: n, nops: nops}, vm, Some(encryptor));
                 // homomorphic encryption using the VM as the queue
