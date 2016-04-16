@@ -1,4 +1,4 @@
-d <- read.csv(file="./delayed.csv", head=TRUE, sep=",")
+d <- read.csv(file="./rand.csv", head=TRUE, sep=",")
 # summary(d)
 names(d)
 

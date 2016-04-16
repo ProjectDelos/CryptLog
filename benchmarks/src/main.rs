@@ -218,36 +218,41 @@ fn http_run<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Option<MetaEnc
 }
 
 fn main() {
-    let nops = 150;
+    let nops = 200;
     /*
     Output:
     Mode, N, W, Nops, Time, Time/Nops
     */
-    for n in vec![1, 2, 4, 16, 64] {
+    for n in vec![1, 2, 4, 16, 32] {
         for w in vec![1, 5, 10, 50, 100] {
             // first do an in memory shared queue
             {
                 println!("Benching: n={} w={}", n, w);
                 // no encryption
-                println!("No Encryption");
-                let encryptor = MetaEncryptor::new();
-                let q = ContendedQueue::new(10);
-                bench_integration(BenchOpts{mode: 0, w: w, n: n, nops: nops}, q, Some(encryptor));
-
-                println!("Encryption: No VM");
-                let encryptor = MetaEncryptor::new();
-                let q = ContendedQueue::new(10);
-                bench_integration(BenchOpts{mode: 1, w: w, n: n, nops: nops}, q, Some(encryptor));
-
-                let encryptor = MetaEncryptor::new();
-                let q = ContendedQueue::new(10);
-                let vm = start_vm(q);
-                http_run(BenchOpts{mode: 2, w: w, n: n, nops: nops}, vm, Some(encryptor));
-
-                let encryptor = MetaEncryptor::new();
-                let q = ContendedQueue::new(10);
-                let vm = start_vm(q);
-                http_run(BenchOpts{mode: 3, w: w, n: n, nops: nops}, vm, Some(encryptor));
+                {
+                    println!("No Encryption");
+                    let encryptor = MetaEncryptor::new();
+                    let q = ContendedQueue::new(10);
+                    bench_integration(BenchOpts{mode: 0, w: w, n: n, nops: nops}, q, Some(encryptor));
+                }
+                {
+                    println!("Encryption: No VM");
+                    let encryptor = MetaEncryptor::new();
+                    let q = ContendedQueue::new(10);
+                    bench_integration(BenchOpts{mode: 1, w: w, n: n, nops: nops}, q, Some(encryptor));
+                }
+                {
+                    let encryptor = MetaEncryptor::new();
+                    let q = ContendedQueue::new(10);
+                    let vm = start_vm(q);
+                    http_run(BenchOpts{mode: 2, w: w, n: n, nops: nops}, vm, Some(encryptor));
+                }
+                {
+                    let encryptor = MetaEncryptor::new();
+                    let q = ContendedQueue::new(10);
+                    let vm = start_vm(q);
+                    http_run(BenchOpts{mode: 3, w: w, n: n, nops: nops}, vm, Some(encryptor));
+                }
                 // homomorphic encryption using the VM as the queue
             }
             // Later transition to DynamoQueue
