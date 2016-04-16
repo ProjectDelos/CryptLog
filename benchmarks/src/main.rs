@@ -126,7 +126,7 @@ fn bench_integration<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Optio
         let ops = gen_ops(&keys, &values, opts.nops, opts.w);
         let runtime: Runtime<Q> = Runtime::new(q.clone(), encryptor.clone());
 
-        let mut btmap = if opts.mode == 0 {
+        let mut btmap = if (opts.mode == 0 && opts.mode == 2) {
             let mut map = UnencBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
             map.start();
             Map::Unenc(map)
@@ -182,7 +182,7 @@ fn bench_integration<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Optio
 
 
 // PORT_NUM has to increment by 1 every time it is used so that every client and server run on a new server.
-static PORT_NUM: AtomicUsize = AtomicUsize::new(6666);
+static PORT_NUM: AtomicUsize = AtomicUsize::new(7000);
 // http_run runs the given queue as an http server with all the clients connecting to it
 fn http_run<Q: IndexedClonable>(opts: BenchOpts, q: Q, encryptor: Option<MetaEncryptor>) {
     let port = PORT_NUM.fetch_add(1, Ordering::SeqCst);
@@ -243,6 +243,11 @@ fn main() {
                 let q = ContendedQueue::new(10);
                 let vm = start_vm(q);
                 http_run(BenchOpts{mode: 2, w: w, n: n, nops: nops}, vm, Some(encryptor));
+
+                let encryptor = MetaEncryptor::new();
+                let q = ContendedQueue::new(10);
+                let vm = start_vm(q);
+                http_run(BenchOpts{mode: 3, w: w, n: n, nops: nops}, vm, Some(encryptor));
                 // homomorphic encryption using the VM as the queue
             }
             // Later transition to DynamoQueue

@@ -235,7 +235,7 @@ impl ContendedQueue {
     pub fn new(delay_ms: u64) -> ContendedQueue {
         ContendedQueue {
             h: Arc::new(Mutex::new(HashMap::new())),
-            delay: randomize(delay_ms, 1, 2),
+            delay: delay_ms, //randomize(delay_ms, 1, 2), // don't delay becuase of scewing the results (not enough samples)
         }
     }
     fn sleep(&self) {
