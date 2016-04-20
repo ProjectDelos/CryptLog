@@ -2,6 +2,7 @@ d <- read.csv(file="./rand.csv", head=TRUE, sep=",")
 # summary(d)
 names(d)
 
+pdf('rplot.pdf')
 for (my_n in unique(d[,2], incomparables = FALSE)) {
   
   with_n <- subset(d, n == my_n, 
@@ -21,6 +22,13 @@ for (my_n in unique(d[,2], incomparables = FALSE)) {
   plot(xs, mode2[,1], col='red', type='l', xlim=c(0.0, max(xs)), ylim=c(0.0, 1000000000), xlab='', ylab='', axes=F)
   par(new=T)
   plot(xs, mode3[,1], col='black', type='l', xlim=c(0.0, max(xs)), ylim=c(0.0, 1000000000), xlab='', ylab='', axes=F)
+
+  legend(max(xs)-100, 1000000000-1000, 
+         c("No-VM", "Enc-No-VM", "VM", "Enc-VM"),
+         text.width = 30,
+         lty=c(1,1,1,1),
+         lwd=c(2.5,2.5),col=c("green", "blue", "red", "black"))
+  
 }
 
 for (my_w in unique(d[,3], incomparables = FALSE)) {
@@ -42,4 +50,11 @@ for (my_w in unique(d[,3], incomparables = FALSE)) {
   plot(xs, mode2[,1], col='red', type='l', xlim=c(0.0, max(xs)), ylim=c(0.0, 1000000000), xlab='', ylab='', axes=F)
   par(new=T)
   plot(xs, mode3[,1], col='black', type='l', xlim=c(0.0, max(xs)), ylim=c(0.0, 1000000000), xlab='', ylab='', axes=F)
+  legend(max(xs)-20, 1000000000, 
+         c("No-VM", "Enc-No-VM", "VM", "Enc-VM"),
+         text.width = 10,
+         lty=c(1,1,1,1),
+         lwd=c(2.5,2.5),col=c("green", "blue", "red", "black"))
 }
+
+dev.off()

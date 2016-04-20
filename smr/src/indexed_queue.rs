@@ -290,9 +290,10 @@ impl IndexedQueue for ContendedQueue {
             self.sleep();
             {
                 let h = self.h.lock().unwrap();
-                let e = h[&from].clone();
+                let mut e = h[&from].clone();
                 if e.writes.is_disjoint(&obj_ids) {
                     // entry relevant to some obj_ids
+                    e.idx = Some(from);
                     tx.send(LogEntry(e)).unwrap();
                 }
             }

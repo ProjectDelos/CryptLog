@@ -123,7 +123,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         loop {
             match rx.recv() {
                 Ok(LogEntry(mut e)) => {
-                    let e_idx = e.idx.clone().unwrap();
+                    let e_idx = e.idx.clone().expect("index does not exist");
                     self.global_idx = e_idx.clone() as LogIndex;
 
                     self.validate_tx(&mut e);
@@ -150,7 +150,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
 
                     for op in &e.operations {
                         // every operation is a write of sorts
-                        *(self.version.get_mut(&op.obj_id).unwrap()) += 1;
+                        *(self.version.get_mut(&op.obj_id).expect("version for object must exist")) += 1;
 
                         if !self.obj_ids.contains(&op.obj_id) {
                             // entry also has operation on object not tracked
@@ -160,7 +160,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                         match op.operator {
                             LogOp::Op(ref operator) => {
                                 // operation on tracked object sent to interested ds
-                                let mut callbacks = self.callbacks.get_mut(&obj_id).unwrap();
+                                let mut callbacks = self.callbacks.get_mut(&obj_id).expect("callbacks for object must exist");
                                 let dec_operator = operator.clone();
                                 for c in callbacks.iter_mut() {
                                     c(e_idx, Operation::new(obj_id, dec_operator.clone()));
@@ -190,7 +190,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                     }
                     let obj_id = s.obj_id;
                     let idx = s.idx;
-                    let callbacks = self.callbacks.get_mut(&obj_id).unwrap();
+                    let callbacks = self.callbacks.get_mut(&obj_id).expect("snapshot callback must exist");
                     let snapshot = s.payload;
                     for c in callbacks.iter_mut() {
                         c(idx, Operation::from_snapshot(obj_id, snapshot.clone()));
