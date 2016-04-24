@@ -136,6 +136,7 @@ impl Snapshotter for AsyncSnapshotter {
                                                       obj_id: ObjId,
                                                       mut callback: Box<Callback>,
                                                       obj: T) {
+        println!("registering object in snapshotter");
         let (obj_chan_tx, obj_chan_rx) = chan::async();
         self.obj_chan.insert(obj_id, obj_chan_tx);
         let snapshots_tx = self.snapshots_tx.clone();
@@ -154,6 +155,7 @@ impl Snapshotter for AsyncSnapshotter {
                         callback(idx, op);
                     }
                     Stop => {
+                        println!("Snapshotter: Stop Message Received");
                         return;
                     }
                 }
@@ -190,6 +192,7 @@ impl Snapshotter for AsyncSnapshotter {
                 }
                 wg.done();
             }
+            println!("Snapshotter: exiting start");
         }));
     }
 
@@ -222,10 +225,16 @@ impl Snapshotter for AsyncSnapshotter {
 
 impl Drop for AsyncSnapshotter {
     fn drop(&mut self) {
+        println!("dropping snapshotter");
         // Tell all per object threads threads to stop (register_object) -> snapshots_tx will close
         for chan in self.obj_chan.values() {
             chan.send(Stop);
         }
+        let mut threads = self.threads.lock().unwrap();
+        for thread in threads.drain(..) {
+            thread.join().unwrap();
+        }
+        println!("snapshotter done");
     }
 }
 
@@ -412,11 +421,14 @@ impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
 {
     fn drop(&mut self) {
         // Tell thread poller to stop and collect threads
+        println!("stopping vm");
         self.stop.store(true, Release);
         let mut threads = self.threads.lock().unwrap();
         for t in threads.drain(..) {
             t.join().unwrap();
         }
+        self.runtime.lock().unwrap().stop();
+        println!("vm shut down");
         // Snapshotter stops on drop snapshotter
     }
 }

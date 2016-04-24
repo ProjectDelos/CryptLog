@@ -29,8 +29,30 @@ pub struct Runtime<Q> {
     pub secure: Option<MetaEncryptor>,
 }
 
+impl<Q> Drop for Runtime<Q> {
+    fn drop(&mut self) {
+        println!("DROPPING RUNTIME");
+    }
+}
+
 impl<Q> Runtime<Q> where Q: IndexedQueue + Send
 {
+    pub fn stop(&mut self) {
+        println!("Clearing Runtime");
+
+        self.callbacks.clear();
+        self.pre_callbacks.clear();
+        self.post_callbacks.clear();
+        self.version.clear();
+        self.obj_ids.clear();
+
+        self.reads.clear();
+        self.writes.clear();
+        self.operations.clear();
+
+        self.secure.take();
+        println!("Runtime Cleared");
+    }
     pub fn new(iq: Q, me: Option<MetaEncryptor>) -> Runtime<Q> {
         return Runtime {
             iq: iq,

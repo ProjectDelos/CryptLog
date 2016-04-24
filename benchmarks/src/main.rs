@@ -5,15 +5,17 @@ extern crate chan;
 extern crate crossbeam;
 extern crate time;
 extern crate getopts;
+extern crate rustc_serialize;
 
+use std::sync::mpsc;
 use rand::Rng;
-use smr::maps::{StringBTMap, EncBTMap, UnencBTMap};
+use smr::maps::{StringBTMap, EncBTMap, UnencBTMap, BTMap};
 use smr::runtime::Runtime;
-use smr::indexed_queue::{IndexedQueue, ContendedQueue, HttpClient, DynamoQueue, SharedQueue, ObjId};
+use smr::indexed_queue::{IndexedQueue, ContendedQueue, HttpClient, DynamoQueue, SharedQueue, ObjId, Entry, LogData, LogIndex};
 use std::sync::{Arc, Mutex};
 use smr::vm::{VM, MapSkiplist, Snapshotter, AsyncSnapshotter};
-use smr::encryptors::{MetaEncryptor};
-use std::collections::{BTreeMap};
+use smr::encryptors::{MetaEncryptor, Ordable, Encrypted};
+use std::collections::{BTreeMap, HashSet};
 use std::thread;
 use std::time::Duration;
 use smr::http_server::HttpServer;
@@ -23,16 +25,48 @@ use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::marker::PhantomData;
+use self::rustc_serialize::{Encodable, Decodable};
+use std::fmt::Debug;
 
 // Need: to be able to create an indexed queue that is also clonable
 trait IndexedClonable: 'static+IndexedQueue+Clone+Send+Sync {}
 
+#[derive(Clone)]
+struct MockHttpQueue<Q> {
+    q: Q,
+}
+
+impl<Q: IndexedClonable> MockHttpQueue<Q> {
+    fn from(q : Q) -> MockHttpQueue<Q> {
+        return MockHttpQueue {
+            q: q,
+        }
+    }
+}
+
+impl<Q: IndexedClonable> IndexedQueue for MockHttpQueue<Q> {
+    fn stream(&mut self,
+              obj_ids: &HashSet<ObjId>,
+              from: LogIndex,
+              to: Option<LogIndex>)
+              -> mpsc::Receiver<LogData> {
+        thread::sleep(Duration::from_millis(100));
+        self.q.stream(obj_ids, from, to)
+    }
+    fn append(&mut self, e: Entry) -> LogIndex {
+        thread::sleep(Duration::from_millis(100));
+        self.q.append(e)
+    }
+}
+
+
+
+impl<Q: IndexedClonable> IndexedClonable for MockHttpQueue<Q> {}
 impl IndexedClonable for DynamoQueue {}
 impl IndexedClonable for SharedQueue {}
 impl IndexedClonable for HttpClient {}
 impl IndexedClonable for ContendedQueue {}
-impl IndexedClonable for VM<SharedQueue, MapSkiplist, AsyncSnapshotter> {}
-impl IndexedClonable for VM<ContendedQueue, MapSkiplist, AsyncSnapshotter> {}
+impl<Q: IndexedClonable> IndexedClonable for VM<Q, MapSkiplist, AsyncSnapshotter> {}
 
 trait QueueFactory<Q> {
     fn new_queue(&mut self) -> Q;
@@ -49,7 +83,7 @@ impl ContendedQueueFactory {
 
 impl QueueFactory<ContendedQueue> for ContendedQueueFactory {
     fn new_queue(&mut self) -> ContendedQueue {
-        ContendedQueue::new(10)
+        ContendedQueue::new(50)
     }
     fn stop(&mut self) {
         return;
@@ -74,9 +108,38 @@ impl QueueFactory<DynamoQueue> for DynamoQueueFactory {
     }
 }
 
+struct MockVMClientFactory<Q: IndexedClonable, F: QueueFactory<Q>> {
+    factory: F,
+    phantom: PhantomData<Q>,
+}
+
+impl<Q: IndexedClonable, F: QueueFactory<Q>> MockVMClientFactory<Q, F> {
+    fn new(base_factory: F) -> MockVMClientFactory<Q, F> {
+        MockVMClientFactory {
+            factory: base_factory,
+            phantom: PhantomData,
+        }
+    }
+}
+
+
+impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<MockHttpQueue<VM<Q, MapSkiplist, AsyncSnapshotter>>> for MockVMClientFactory<Q, F> {
+    fn new_queue(&mut self) -> MockHttpQueue<VM<Q, MapSkiplist, AsyncSnapshotter>> {
+        // Start up the vm in a separate thread
+        let q = start_vm(self.factory.new_queue());
+        MockHttpQueue::from(q)
+    }
+    fn stop(&mut self) {
+        return;
+    }
+}
+
+
+
 struct VMClientFactory<Q: IndexedClonable, F: QueueFactory<Q>> {
     handle: Option<thread::JoinHandle<()>>,
     stop_send: Option<chan::Sender<()>>,
+    done_recv: Option<chan::Receiver<()>>,
     factory: F,
     phantom: PhantomData<Q>,
     
@@ -87,6 +150,7 @@ impl<Q: IndexedClonable, F: QueueFactory<Q>> VMClientFactory<Q, F> {
         VMClientFactory {
             handle: None,
             stop_send: None,
+            done_recv: None,
             factory: base_factory,
             phantom: PhantomData,
         }
@@ -96,6 +160,7 @@ impl<Q: IndexedClonable, F: QueueFactory<Q>> VMClientFactory<Q, F> {
 // PORT_NUM has to increment by 1 every time it is used so that every client and server run on a new server.
 static PORT_NUM: AtomicUsize = AtomicUsize::new(7000);
 
+// TODO: Make Slow wrapper for queue: Remove HTTP Server elements
 impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<HttpClient> for VMClientFactory<Q, F> {
     fn new_queue(&mut self) -> HttpClient {
         let port = PORT_NUM.fetch_add(1, Ordering::SeqCst);
@@ -104,6 +169,7 @@ impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<HttpClient> for VMClie
         let to_server_addr = String::from("http://127.0.0.1:")+ &port.to_string();
         
         let (stop_send, stop_recv) = chan::sync(0);
+        let (done_send, done_recv) = chan::sync(0);
         
         let q = start_vm(self.factory.new_queue());
         
@@ -111,23 +177,38 @@ impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<HttpClient> for VMClie
             let mut s = HttpServer::new(q, &server_addr);
             stop_recv.recv().expect("stop_recv does not exist");
             s.close();
+            //done_send.send(());
         });
         self.handle = Some(handle);
         self.stop_send = Some(stop_send);
+        self.done_recv = Some(done_recv);
         
-        
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(1000));
         let client = HttpClient::new(&to_server_addr);
         return client;
     }
     fn stop(&mut self) {
+        if self.stop_send.is_none() || self.handle.is_none() {
+            return;
+        }
         let stop = self.stop_send.take().expect("stop_send does not exist");
         stop.send(());
         let handle = self.handle.take().expect("handle does not exist");
-        handle.join();
+        handle.join().unwrap();
+        // DO NOT WAIT TILL DONE
+        // HYPER (the http library) currently is unable to close servers
+        // It leaks the underlying threads as well as the underlying listener
+        //let done = self.done_recv.take().expect("done send does not exist");
+        //done.recv().expect("failed to receive from done channel");
         return;
     }
 }
+/*
+impl <Q: IndexedClonable, F: QueueFactory<Q>> Drop for VMClientFactory<Q, F> {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}*/
 
 /*
 Benchmarks the given map with a synthetic work load of w% writes per node and n nodes
@@ -192,7 +273,7 @@ struct BenchOpts {
 
 impl BenchOpts {
     fn header(mut out: &mut File) {
-        writeln!(&mut out, "mode, n, nops, delay, t_per_op").unwrap();
+        writeln!(&mut out, "mode, n, w, nops, delay, t_per_op").unwrap();
     }
     fn output_csv(&self, t: u64) {
         let mut out = OpenOptions::new()
@@ -217,7 +298,8 @@ enum Map<Q> {
 // nops: is the total number of operations
 // q: is the implementor of the shared queue
 // encryptor is the encryptor that is being used
-fn bench_integration<Q: IndexedClonable>(q: Q, opts: BenchOpts) {
+fn bench_integration<Q: IndexedClonable, F: QueueFactory<Q>>(mut factory: F, opts: BenchOpts) {
+    let q = factory.new_queue();
     let encryptor = Some(MetaEncryptor::new());
     let (keys, values) = gen_kvs(1000);
     let mut maps : Vec<_> = (0..opts.n).into_iter().map(|_| {
@@ -282,20 +364,18 @@ struct RecOpts {
     out: String,
     mode: i64,
     n: i64,
-    nops: i64,
 }
 
 impl RecOpts {
-    fn new(out: String, mode: i64, n: i64, nops: i64) -> RecOpts {
+    fn new(out: String, mode: i64, n: i64) -> RecOpts {
         RecOpts {
             out: out,
             mode: mode,
             n: n,
-            nops: nops,
         }
     }
     fn header(mut out: &mut File) {
-        writeln!(&mut out, "mode, n, nops, t_per_op").unwrap();
+        writeln!(&mut out, "mode, n, t_per_op").unwrap();
     }
     
     fn output_csv(&self, t: u64) {
@@ -303,49 +383,53 @@ impl RecOpts {
                 .write(true)
                 .append(true)
                 .open(&self.out).unwrap();
-        writeln!(&mut out, "{}, {}, {}, {}", self.mode, self.n, self.nops, t).unwrap();
+        writeln!(&mut out, "{}, {}, {}", self.mode, self.n, t).unwrap();
     }
 }
 
-fn bench_recovery<Q: IndexedClonable, F: QueueFactory<Q>>(mut factory: F, opts: RecOpts) {
-    let mode = opts.mode;
-    let n = opts.n;
-    let nops = opts.nops;
-    
-    let (keys, values) = gen_kvs(100);
+type MapFactory<Q, K, V> = Fn(&Arc<Mutex<Runtime<Q>>>, i32, BTreeMap<String, String>) -> BTMap<String, String, Q, K, V> + Send + Sync;
+
+fn bench_recovery<Q: IndexedClonable,
+                  F: QueueFactory<Q>,
+                  K: 'static+Ord+Clone+Send+Encodable+Decodable+Debug+Sync,
+                  V: 'static+Debug+Clone+Send+Encodable+Decodable+Sync>(map_factory: Box<MapFactory<Q, K, V>>, mut factory: F, opts: RecOpts) {
+    let (keys, values) = gen_kvs(1000);
 
     // bench without the vm
     let mut t_total = 0;
     let mut samples = 0;
     {
-        // get many different samples
-        for i in 0..20 {
-            let q = factory.new_queue();
-            let encryptor = Some(MetaEncryptor::new());
-            let mut ops = gen_ops(&keys, &values, opts.n, 1000);
-            let mut writer = StringBTMap::new(&Arc::new(Mutex::new(Runtime::new(q.clone(), encryptor.clone()))), 1, BTreeMap::new());
-            writer.start();
-            let mut last_k = "".to_string();
-            for op in ops.drain(..) {
-                match op {
-                        Op::Write(k, v) => {
-                            //println!("writing {} {}", k, v);
-                            writer.insert(k.clone(), v);
-                            last_k = k;
+        let total_samples = 20;
+        let encryptor = Some(MetaEncryptor::new());
+        let mut ops = gen_ops(&keys, &values, opts.n * total_samples, 1000);
+        let q = factory.new_queue();
+        let mut writer = map_factory(&Arc::new(Mutex::new(Runtime::new(q.clone(), encryptor.clone()))), 1, BTreeMap::new());
+        writer.start();
+        let mut reader = map_factory(&Arc::new(Mutex::new(Runtime::new(q.clone(), encryptor.clone()))), 1, BTreeMap::new());
+        reader.start();
+        let mut last_k;
+        writer.insert("".to_string(), "".to_string());
+        let mut i = 0;
+        for op in ops.drain(..) {
+            match op {
+                    Op::Write(k, v) => {
+                        writer.insert(k.clone(), v);
+                        last_k = k;
+                        // one more write has happened
+                        i += 1;
+                        // every opts.n writes perform a read and record the time it takes
+                        if i % opts.n == 0 {
+                            let start = time::precise_time_ns();
+                            reader.get(&last_k);
+                            let end = time::precise_time_ns();
+                            t_total += end - start;
+                            samples += 1;
                         }
-                        Op::Read(_) => panic!("should only be writes"),
-                }
+                    }
+                    Op::Read(_) => panic!("should only be writes"),
             }
-            
-            let start = time::precise_time_ns();
-            let mut reader = StringBTMap::new(&Arc::new(Mutex::new(Runtime::new(q.clone(), encryptor.clone()))), 1, BTreeMap::new());
-            reader.start();
-            reader.get(&last_k);
-            let end = time::precise_time_ns();
-            t_total += end - start;
-            samples += 1;
-            factory.stop();
         }
+        factory.stop();
     }
     opts.output_csv(t_total/samples);
 }
@@ -354,14 +438,13 @@ fn bench_recovery<Q: IndexedClonable, F: QueueFactory<Q>>(mut factory: F, opts: 
 struct LatencyOpts {
     out: String,
     mode: i64,
-    nops: i64,
     n: i64, // number of clients writing
     t: i64, // amount of ms between reader's reads
 }
 
 impl LatencyOpts {
     fn header(mut out: &mut File) {
-        writeln!(&mut out, "mode, n, nops, delay, t_per_op").unwrap();
+        writeln!(&mut out, "mode, n, delay, t_per_op").unwrap();
     }
     fn output_csv(&self, t: u64) {
         let mut out = OpenOptions::new()
@@ -369,23 +452,33 @@ impl LatencyOpts {
                 .append(true)
                 .open(&self.out).unwrap();
 
-        writeln!(&mut out, "{}, {}, {}, {}, {}", self.mode, self.n, self.nops, self.t, t).unwrap();
+        writeln!(&mut out, "{}, {}, {}, {}", self.mode, self.n, self.t, t).unwrap();
     }
 }
 
+
+
 // Increase the number of running clients
 // TODO: Test read latency: with n operations between reads (reader that continuously reads)
-fn bench_read_latency<Q: IndexedClonable, F: QueueFactory<Q>>(mut factory: F, opts: LatencyOpts) {
+fn bench_read_latency<Q: IndexedClonable,
+                      F: QueueFactory<Q>,
+                      K: 'static+Ord+Clone+Send+Encodable+Decodable+Debug+Sync,
+                      V: 'static+Debug+Clone+Send+Encodable+Decodable+Sync>(map_factory: Box<MapFactory<Q, K, V>>, mut factory: F, opts: LatencyOpts) {
     let q = factory.new_queue();
+    // BUG: When nops is set too high and we are running the VM we get a connection reset by peer
+    let nops = 100;
     
     let encryptor = Some(MetaEncryptor::new());
-    let (keys, values) = gen_kvs(opts.n);
+    // Generate 1000 unique key and value possibilities
+    let (keys, values) = gen_kvs(1000);
     let stop = Arc::new(Mutex::new(false));
     
-    let mut writers : Vec<_> = [0..opts.n].into_iter().map(|_| {
-        let ops = gen_ops(&keys, &values, opts.nops, 1000); // all writes
+    // Generate n different writers
+    let mut writers : Vec<_> = (0..opts.n).into_iter().map(|_| {
+        // Generate a list of 1000 operations all of which are writes
+        let ops = gen_ops(&keys, &values, nops, 1000);
         let runtime: Runtime<Q> = Runtime::new(q.clone(), encryptor.clone());
-        let mut writer = StringBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
+        let mut writer = map_factory(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
         writer.start();
         (writer, ops)
     }).collect();
@@ -402,7 +495,7 @@ fn bench_read_latency<Q: IndexedClonable, F: QueueFactory<Q>>(mut factory: F, op
     let t = opts.t as u64;
     let reader_handle = thread::spawn(move || {
         let runtime: Runtime<Q> = Runtime::new(q.clone(), encryptor.clone());
-        let mut reader =  StringBTMap::new(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
+        let mut reader = map_factory(&Arc::new(Mutex::new(runtime)), 1, BTreeMap::new());
         reader.start();
         read_recv.recv().unwrap();
         loop {
@@ -443,13 +536,15 @@ fn bench_read_latency<Q: IndexedClonable, F: QueueFactory<Q>>(mut factory: F, op
     let _ : Vec<_> = handles.map(|h| {
         h.join().unwrap();
     }).collect();
-    let t = total_t.load(Ordering::SeqCst) / samples.load(Ordering::SeqCst);
     {
         let mut s = stop.lock().unwrap();
         *s = true;
     } 
+    let t = total_t.load(Ordering::SeqCst) / samples.load(Ordering::SeqCst);
     reader_handle.join().unwrap();
+    thread::sleep(Duration::from_millis(1000));
     factory.stop();
+    thread::sleep(Duration::from_millis(100));
     opts.output_csv(t as u64)
 }
 
@@ -480,17 +575,27 @@ fn main() {
             LatencyOpts::header(&mut out);
         }
         // test read latency
-        for n in vec![2, 4, 8, 16, 32, 64, 128, 512, 1024] {
-            let nops = 100;
+        for n in vec![2, 4, 8, 16, 32] {
+            println!("Benching Latency: {}", n);
             {
-                println!("Benching Read Latency: No VM");
-                let opts = LatencyOpts{out: output.clone(), mode: 0, nops: nops, n: n, t: 10000};
-                bench_read_latency(ContendedQueueFactory::new(), opts);
+                println!("Latency: -VM-ENC");
+                let opts = LatencyOpts{out: output.clone(), mode: 0, n: n, t: 1000};
+                bench_read_latency(Box::new(UnencBTMap::new), ContendedQueueFactory::new(), opts);
             }
             {
-                println!("Benching Read Latency: VM");
-                let opts = LatencyOpts{out: output.clone(), mode: 1, nops: nops, n: n, t: 10000};
-                bench_read_latency(VMClientFactory::new(ContendedQueueFactory::new()), opts);
+                println!("Latency: -VM+ENC");
+                let opts = LatencyOpts{out: output.clone(), mode: 1, n: n, t: 1000};
+                bench_read_latency(Box::new(StringBTMap::new), ContendedQueueFactory::new(), opts);
+            }
+            {
+                println!("Latency: +VM-ENC");
+                let opts = LatencyOpts{out: output.clone(), mode: 2, n: n, t: 1000};
+                bench_read_latency(Box::new(UnencBTMap::new), MockVMClientFactory::new(ContendedQueueFactory::new()), opts);
+            }
+            {
+                println!("Latency: +VM+ENC");
+                let opts = LatencyOpts{out: output.clone(), mode: 3, n: n, t: 1000};
+                bench_read_latency(Box::new(StringBTMap::new), MockVMClientFactory::new(ContendedQueueFactory::new()), opts);
             }
         }
     }
@@ -507,22 +612,35 @@ fn main() {
             RecOpts::header(&mut out);
         }
         // test recovery latency
-        for n in (0..10).map(|i| (2 as i64).pow(i)) {
-            let nops = 10;
+        for n in (0..7).map(|i| (2 as i64).pow(i)) {
+            println!("Benching Recovery: n={}", n);
             {
-                // bench without the vm
-                println!("benching recovery no vm");
-                let opts = RecOpts::new(output.clone(), 0, n, nops);
-                bench_recovery(ContendedQueueFactory::new(), opts);
+                // bench without the vm and without encryption
+                println!("Recovery: -VM-ENC");
+                let opts = RecOpts::new(output.clone(), 0, n);
+                bench_recovery(Box::new(UnencBTMap::new), ContendedQueueFactory::new(), opts);
             }
             {
-                let opts = RecOpts::new(output.clone(), 1, n, nops);
-                println!("benching recovery vm");
-                bench_recovery(VMClientFactory::new(ContendedQueueFactory::new()), opts);
+                // bench without the vm and with encryption
+                println!("Recovery: -VM+ENC");
+                let opts = RecOpts::new(output.clone(), 1, n);
+                bench_recovery(Box::new(StringBTMap::new), ContendedQueueFactory::new(), opts);
+            }
+            {
+                // bench with the vm and without encryption
+                let opts = RecOpts::new(output.clone(), 2, n);
+                println!("Recovery: +VM-ENC");
+                bench_recovery(Box::new(UnencBTMap::new), MockVMClientFactory::new(ContendedQueueFactory::new()), opts);
+            }
+            {
+                // bench with the vm and without encryption
+                let opts = RecOpts::new(output.clone(), 3, n);
+                println!("Recovery: +VM+ENC");
+                bench_recovery(Box::new(StringBTMap::new), MockVMClientFactory::new(ContendedQueueFactory::new()), opts);
             }
         }
     }
-    
+    return;
     if matches.opt_present("i") {
         let output = matches.opt_str("i").unwrap();
         {
@@ -540,7 +658,7 @@ fn main() {
             for w in vec![1, 5, 10, 50, 100] {
                 // first do an in memory shared queue
                 {
-                    println!("Benching: n={} w={}", n, w);
+                    println!("Benching Integration: n={} w={}", n, w);
                     // no encryption
                     {
                         println!("No Encryption");
@@ -556,15 +674,15 @@ fn main() {
                     }
                     {
                         println!("No Encryption:: VM");
-                        vm_wrapper(
-                            VMClientFactory::new(ContendedQueueFactory::new()),
-                            BenchOpts{out: output.clone(), mode: 2, w: w, n: n, nops: nops}, bench_integration)
+                        bench_integration(
+                            MockVMClientFactory::new(ContendedQueueFactory::new()),
+                            BenchOpts{out: output.clone(), mode: 2, w: w, n: n, nops: nops});
                     }
                     {
                         println!("Encryption: VM");
-                        vm_wrapper(
-                            VMClientFactory::new(ContendedQueueFactory::new()),
-                            BenchOpts{out: output.clone(), mode: 3, w: w, n: n, nops: nops}, bench_integration)
+                        bench_integration(
+                            MockVMClientFactory::new(ContendedQueueFactory::new()),
+                            BenchOpts{out: output.clone(), mode: 3, w: w, n: n, nops: nops});
                     }
                     // homomorphic encryption using the VM as the queue
                 }

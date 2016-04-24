@@ -235,7 +235,7 @@ impl ContendedQueue {
     pub fn new(delay_ms: u64) -> ContendedQueue {
         ContendedQueue {
             h: Arc::new(Mutex::new(HashMap::new())),
-            delay: delay_ms, //randomize(delay_ms, 1, 2), // don't delay becuase of scewing the results (not enough samples)
+            delay: 50,
         }
     }
     fn sleep(&self) {
@@ -316,6 +316,12 @@ impl Clone for HttpClient {
     }
 }
 
+impl Drop for HttpClient {
+    fn drop(&mut self) {
+        println!("stopping http client");
+    }
+}
+
 impl HttpClient {
     pub fn new(to_server: &str) -> HttpClient {
         return HttpClient {
@@ -371,18 +377,18 @@ impl IndexedQueue for HttpClient {
     fn append(&mut self, e: Entry) -> LogIndex {
         // let e = json::encode(&e).unwrap();
         let e = HttpRequest::Append(e);
-        let body = json::encode(&e).unwrap();
+        let body = json::encode(&e).expect("error encoding value");
         thread::sleep(self.delay);
         let mut http_resp = self.c
                                 .post(&self.to_server)
                                 .header(Connection::keep_alive())
                                 .body(&body)
                                 .send()
-                                .unwrap();
+                                .expect("error getting from server");
         thread::sleep(self.delay);
         let mut resp = String::new();
-        http_resp.read_to_string(&mut resp).unwrap();
-        let resp = json::decode(&resp).unwrap();
+        http_resp.read_to_string(&mut resp).expect("error reading from response");
+        let resp = json::decode(&resp).expect("error decoding http response");
         match resp {
             HttpResponse::Append(idx) => {
                 return idx;

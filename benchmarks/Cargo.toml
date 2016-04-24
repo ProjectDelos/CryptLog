@@ -9,6 +9,7 @@ chan = "0.1.14"
 crossbeam = "0.2.8"
 time = "0.1"
 getopts = "0.2"
+rustc-serialize = "*"
 
 [dependencies.smr]
 path = "../smr"
