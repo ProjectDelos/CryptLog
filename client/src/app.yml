@@ -1,0 +1,57 @@
+name: client
+version: 1.0
+author: Dylan Visher
+about: Runs a client to CryptLog that performs simple benchmark options
+args:
+    - nops:
+        short: n
+        long: nops
+        value_name: NOPS
+        help: The number of operations the client should perform.
+        required: true
+        takes_value: true
+    - writes:
+        short: w
+        long: writes
+        value_name: WRITES
+        help: The number of writes the client should perform.
+        required: true
+        takes_value: true
+    - keys:
+        short: k
+        long: keys
+        value_name: KEYS
+        help: The number of unique keys that should be added to the map.
+        required: true
+        takes_value: true
+    - delay:
+        short: d
+        long: delay
+        value_name: DELAY
+        help: The amount of time in milliseconds to delay between operations.
+        required: true
+        takes_value: true
+    - server:
+        short: s
+        long: server
+        value_name: SERVER_IP
+        help: The ip of the server if it is using a VM.
+        takes_value: true
+    - port:
+        short: p
+        long: port
+        value_name: SERVER_PORT
+        help: The port of the server if it is using a VM.
+        takes_value: true
+    - enc:
+        short: e
+        long: enc
+        value_name: ENCRYPTION
+        help: Present if the map is encryption.
+    - out:
+        short: o
+        long: out
+        value_name: OUTPUT_FILE
+        help: Specifies the csv output file.
+        required: true
+        takes_value: true

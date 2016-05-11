@@ -1,0 +1,24 @@
+name: server
+version: 1.0
+author: Dylan Visher
+about: Runs a server/VM for CryptLog that proxies client requests
+args:
+    - enc:
+        short: e
+        long: enc
+        value_name: ENCRYPTION
+        help: Present if the map is encryption.
+    - server:
+        short: s
+        long: server
+        value_name: SERVER_IP
+        help: The ip of the server.
+        takes_value: true
+        required: true
+    - port:
+        short: p
+        long: port
+        value_name: SERVER_PORT
+        help: The port of the server.
+        takes_value: true
+        required: true

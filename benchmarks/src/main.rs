@@ -19,7 +19,8 @@ use std::collections::{BTreeMap, HashSet};
 use std::thread;
 use std::time::Duration;
 use smr::http_server::HttpServer;
-use std::io::Write;use std::sync::atomic::{AtomicUsize, Ordering};
+use std::io::Write;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use getopts::Options;
 use std::env;
 use std::fs::File;
@@ -103,9 +104,6 @@ impl QueueFactory<DynamoQueue> for DynamoQueueFactory {
     fn new_queue(&mut self) -> DynamoQueue {
         DynamoQueue::new()
     }
-    fn stop(&mut self) {
-        return;
-    }
 }
 
 struct MockVMClientFactory<Q: IndexedClonable, F: QueueFactory<Q>> {
@@ -129,9 +127,6 @@ impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<MockHttpQueue<VM<Q, Ma
         let q = start_vm(self.factory.new_queue());
         MockHttpQueue::from(q)
     }
-    fn stop(&mut self) {
-        return;
-    }
 }
 
 
@@ -142,7 +137,7 @@ struct VMClientFactory<Q: IndexedClonable, F: QueueFactory<Q>> {
     done_recv: Option<chan::Receiver<()>>,
     factory: F,
     phantom: PhantomData<Q>,
-    
+
 }
 
 impl<Q: IndexedClonable, F: QueueFactory<Q>> VMClientFactory<Q, F> {
@@ -164,15 +159,15 @@ static PORT_NUM: AtomicUsize = AtomicUsize::new(7000);
 impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<HttpClient> for VMClientFactory<Q, F> {
     fn new_queue(&mut self) -> HttpClient {
         let port = PORT_NUM.fetch_add(1, Ordering::SeqCst);
-        
+
         let server_addr = String::from("127.0.0.1:") + &port.to_string();
         let to_server_addr = String::from("http://127.0.0.1:")+ &port.to_string();
-        
+
         let (stop_send, stop_recv) = chan::sync(0);
         let (done_send, done_recv) = chan::sync(0);
-        
+
         let q = start_vm(self.factory.new_queue());
-        
+
         let handle = thread::spawn(move || {
             let mut s = HttpServer::new(q, &server_addr);
             stop_recv.recv().expect("stop_recv does not exist");
@@ -182,7 +177,7 @@ impl<Q: IndexedClonable, F: QueueFactory<Q>> QueueFactory<HttpClient> for VMClie
         self.handle = Some(handle);
         self.stop_send = Some(stop_send);
         self.done_recv = Some(done_recv);
-        
+
         thread::sleep(Duration::from_millis(1000));
         let client = HttpClient::new(&to_server_addr);
         return client;
@@ -377,7 +372,7 @@ impl RecOpts {
     fn header(mut out: &mut File) {
         writeln!(&mut out, "mode, n, t_per_op").unwrap();
     }
-    
+
     fn output_csv(&self, t: u64) {
         let mut out = OpenOptions::new()
                 .write(true)
@@ -467,12 +462,12 @@ fn bench_read_latency<Q: IndexedClonable,
     let q = factory.new_queue();
     // BUG: When nops is set too high and we are running the VM we get a connection reset by peer
     let nops = 100;
-    
+
     let encryptor = Some(MetaEncryptor::new());
     // Generate 1000 unique key and value possibilities
     let (keys, values) = gen_kvs(1000);
     let stop = Arc::new(Mutex::new(false));
-    
+
     // Generate n different writers
     let mut writers : Vec<_> = (0..opts.n).into_iter().map(|_| {
         // Generate a list of 1000 operations all of which are writes
@@ -482,13 +477,13 @@ fn bench_read_latency<Q: IndexedClonable,
         writer.start();
         (writer, ops)
     }).collect();
-    
-    
+
+
     let (send, recv) = chan::async();
     let total_t = Arc::new(AtomicUsize::new(0));
     let samples = Arc::new(AtomicUsize::new(0));
     let read_recv = recv.clone();
-    
+
     let r_total_t = total_t.clone();
     let r_samples = samples.clone();
     let r_stop = stop.clone();
@@ -503,18 +498,18 @@ fn bench_read_latency<Q: IndexedClonable,
                  let s = r_stop.lock().unwrap();
                  if *s {
                      return;
-                 } 
+                 }
             }
             let start = time::precise_time_ns();
             reader.get(&keys[0]);
             let end = time::precise_time_ns();
             r_total_t.fetch_add((end-start) as usize, Ordering::SeqCst);
             r_samples.fetch_add(1, Ordering::SeqCst);
-            thread::sleep(Duration::from_millis(t));  
+            thread::sleep(Duration::from_millis(t));
         }
     });
-    
-    
+
+
     let handles = writers.drain(..).map(|(mut writer, mut ops)| {
         let recv = recv.clone();
         thread::spawn(move || {
@@ -529,7 +524,7 @@ fn bench_read_latency<Q: IndexedClonable,
             }).collect();
         })
     });
-    
+
     for _ in 0..(opts.n+1) {
         send.send(());
     }
@@ -539,7 +534,7 @@ fn bench_read_latency<Q: IndexedClonable,
     {
         let mut s = stop.lock().unwrap();
         *s = true;
-    } 
+    }
     let t = total_t.load(Ordering::SeqCst) / samples.load(Ordering::SeqCst);
     reader_handle.join().unwrap();
     thread::sleep(Duration::from_millis(1000));
@@ -599,7 +594,7 @@ fn main() {
             }
         }
     }
-    
+
     if matches.opt_present("r") {
         let output = matches.opt_str("r").unwrap();
         {
