@@ -31,6 +31,8 @@ func init() {
 	flag.BoolVar(&testMode, "test", false, "run on test table")
 	ses := session.New(&aws.Config{Region: aws.String("us-west-2")})
 	svc = dynamodb.New(ses, aws.NewConfig().WithRegion("us-west-2"))
+	table = "cryptlog_test"
+	testMode = true
 }
 
 type dbEntry struct {
@@ -106,8 +108,10 @@ func get(index int64) (string, error) {
 	return entry.Data, err
 }
 
-func put(index int64, data string, conditional bool) (error, bool) {
+// return the index where it was added
+func put(index int64, data string, conditional bool) (int64, error) {
 	log.Println("PUT:", index, data, conditional)
+retry:
 	i := Index
 	params := &dynamodb.PutItemInput{
 		TableName: aws.String(table), // Required
@@ -122,6 +126,7 @@ func put(index int64, data string, conditional bool) (error, bool) {
 		}
 		params.ConditionExpression = aws.String("attribute_not_exists(#index)")
 	}
+
 	resp, err := svc.PutItem(params)
 
 	if err != nil {
@@ -129,15 +134,17 @@ func put(index int64, data string, conditional bool) (error, bool) {
 		// Message from an error.
 		if ae, ok := err.(awserr.RequestFailure); ok {
 			if ae.Code() == "ConditionalCheckFailedException" {
-				log.Println("Failed conditional check: caught:", resp, err)
-				return err, true
+				// try the next index
+				index += 1
+				goto retry
 			}
 		}
 		log.Println("PUT: ERR:", reflect.TypeOf(err), err.Error())
-		return err, false
+		return -1, err
 	}
 	log.Println("PUT: RESP:", resp)
-	return nil, false
+	err = updateLength()
+	return index, err
 }
 
 func updateLength() error {
@@ -194,33 +201,41 @@ func reset() {
 	if err != nil {
 		log.Println("Failed to delete table: ", err)
 	}
-	time.Sleep(5 * time.Second)
+	time.Sleep(2 * time.Second)
 
 	create := &dynamodb.CreateTableInput{
 		TableName: aws.String(table),
 		KeySchema: []*dynamodb.KeySchemaElement{
 			{
 				AttributeName: aws.String(Index),
-				KeyType:       aws.String("N"),
-			},
-			{
-				AttributeName: aws.String(LogLength),
-				KeyType:       aws.String("S"),
-			},
-			{
-				AttributeName: aws.String(Data),
-				KeyType:       aws.String("S"),
+				KeyType:       aws.String("RANGE"),
 			},
 		},
 		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{ // Required
 			ReadCapacityUnits:  aws.Int64(5), // Required
 			WriteCapacityUnits: aws.Int64(5), // Required
 		},
+		AttributeDefinitions: []*dynamodb.AttributeDefinition{ // Required
+			{
+				AttributeName: aws.String(Index),
+				AttributeType: aws.String("N"),
+			},
+			{
+				AttributeName: aws.String(LogLength),
+				AttributeType: aws.String("S"),
+			},
+			{
+				AttributeName: aws.String(Data),
+				AttributeType: aws.String("S"),
+			},
+			// More values...
+		},
 	}
 	_, err = svc.CreateTable(create)
 	if err != nil {
 		log.Fatal("Failed to create table: ", err)
 	}
+	time.Sleep(2 * time.Second)
 }
 
 // RequestType is the type of request
@@ -274,26 +289,19 @@ func handleConnection(conn net.Conn) {
 
 		switch req.RequestType {
 		case Put:
-			var valErr bool
-			for {
-				err, valErr = put(req.Index, req.Data, req.Conditional)
-				// there was a validation error
-				if err != nil && !valErr {
-					break
-				}
-				// it was successful
-				if err == nil {
-					break
-				}
-				// it was a validation error: try the next index
-				req.Index++
-				resp.Index++
+			var idx int64
+			idx, err = put(req.Index, req.Data, req.Conditional)
+			// there was a validation error
+			if err == nil {
+				req.Index = idx
+				resp.Index = idx
+			}
+
+			// it was successful
+			if err != nil {
+				log.Println("ERROR Putting")
 			}
 			resp.ValidationErr = false
-			if err != nil {
-				// update the length field of the queue
-				err = updateLength()
-			}
 		case Get:
 			var data string
 			data, err = get(req.Index)
@@ -316,9 +324,8 @@ func handleConnection(conn net.Conn) {
 
 func main() {
 	flag.Parse()
-	table = "cryptlog"
-	if testMode {
-		table = "cryptlog_test"
+	if !testMode {
+		table = "cryptlog"
 	}
 	ln, err := net.Listen("tcp", ":8080")
 	if err != nil {
