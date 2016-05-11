@@ -7,26 +7,26 @@ use encryptors::MetaEncryptor;
 pub type Callback = FnMut(LogIndex, Operation) + Send;
 pub type EntryCallback = FnMut(Entry) + Send;
 
-// State::Encoded(s) => State::Encrypted(s.into_bytes()),
-// State::Encrypted(v) => State::Encoded(String::from_utf8(v).unwrap()),
-
+// Class: Runtime
+// Paramatrized By:
+// * Q: structure allowing seamless communicating with Shared Log
 pub struct Runtime<Q> {
-    iq: Q,
+    iq: Q, // structure allowing seamless communicating with Shared Log
 
     callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
     pre_callbacks: Vec<Box<EntryCallback>>,
     post_callbacks: Vec<Box<EntryCallback>>,
-    version: HashMap<ObjId, LogIndex>,
-    pub global_idx: LogIndex,
-    obj_ids: HashSet<ObjId>,
+    pub global_idx: LogIndex, // index of last SharedLog entry synced
+    obj_ids: HashSet<ObjId>, // ids of objectes registered with runtime
 
     // Transaction semantics
-    reads: HashMap<ObjId, LogIndex>,
-    writes: HashSet<ObjId>,
-    operations: Vec<Operation>,
-    pub tx_mode: bool, // begin_tx_idx: Option<LogIndex>,
+    reads: HashMap<ObjId, LogIndex>, // map of <object id, version read during transaction>
+    writes: HashSet<ObjId>, // set of obj_ids written in current transaction
+    version: HashMap<ObjId, LogIndex>, // map of last version read for each object id
+    operations: Vec<Operation>, // operations to be included in current open transaction, if any
+    pub tx_mode: bool, // true during transaction
 
-    pub secure: Option<MetaEncryptor>,
+    pub secure: Option<MetaEncryptor>, // structure to allow use of exising Encryptors/ Decryptors
 }
 
 impl<Q> Drop for Runtime<Q> {
@@ -53,6 +53,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         self.secure.take();
         println!("Runtime Cleared");
     }
+
     pub fn new(iq: Q, me: Option<MetaEncryptor>) -> Runtime<Q> {
         return Runtime {
             iq: iq,
@@ -75,9 +76,11 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
 
     pub fn append(&mut self, obj_id: ObjId, data: State) {
         if self.tx_mode {
+            // accumulate transaction writes
             self.writes.insert(obj_id);
             self.operations.push(Operation::new(obj_id, data));
         } else {
+            // append (send) entry to SharedLog
             self.iq.append(Entry::new(HashMap::new(),
                                       vec![obj_id].into_iter().collect(),
                                       vec![Operation::new(obj_id, data)],
@@ -93,15 +96,18 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
     }
 
     pub fn end_tx(&mut self) -> TxState {
+        // signal end of transaction by sending TxEnd logentry to SharedLog
         let tx_idx = self.iq.append(Entry::new(self.reads.drain().collect(),
                                                self.writes.drain().collect(),
                                                self.operations.drain(..).collect(),
                                                TxType::End,
                                                TxState::None));
+        // clean up transaction state
         self.tx_mode = false;
         self.reads.clear();
         self.writes.clear();
         self.operations.clear();
+        // sync up to transaction before returning to client
         return self.internal_sync(None, Some(tx_idx));
     }
 
@@ -110,12 +116,15 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
             // validate based on versions
             for (obj_id, version) in &e.reads {
                 if *version < self.version[obj_id] {
+                    // there exist more recent changes to obj_id in tx reads set
+                    // so transaction must be aborted
                     e.tx_state = TxState::Aborted;
                     return;
                 }
             }
+
             e.tx_state = TxState::Accepted;
-            // update versions
+            // update versions of objects in writes set
             for obj_id in &e.writes {
                 let idx: &mut i64 = self.version.get_mut(obj_id).unwrap();
                 *idx = e.idx.unwrap();
@@ -123,13 +132,24 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         }
     }
 
+    // Method: sync, Blocking
+    // Syncs all objects registered with runtime
+    // Arguments:
+    //  * obj_id : obj_id of object that led to need of sync, or None
     pub fn sync(&mut self, obj_id: Option<ObjId>) {
         self.internal_sync(obj_id, None);
     }
 
+    // Method: internal_sync, Blocking
+    // Syncs all objects registered with runtime fully if tx_idx is None, or up to tx_idx
+    // Arguments:
+    // * obj_id : obj_id of object that led to need of sync, or None
+    // * tx_idx: sync up to transaction idx if some
+    // Returns:
+    // * returns TxState::None if tx_idx is None, or the state of transaction tx_idx if tx_idx is some
     pub fn internal_sync(&mut self, obj_id: Option<ObjId>, tx_idx: Option<LogIndex>) -> TxState {
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
-        // for tx, only record read
+        // during transaction, record read, return
         if obj_id.is_some() {
             if self.tx_mode {
                 let obj_id = obj_id.unwrap();
@@ -141,10 +161,11 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
 
         // sync all objects runtime tracks
         let rx = self.iq.stream(&self.obj_ids, self.global_idx + 1, None);
-        // send updates to relevant callbacks
+        // process and send updates to relevant callbacks
         loop {
             match rx.recv() {
                 Ok(LogEntry(mut e)) => {
+                    // update global index to entry index
                     let e_idx = e.idx.clone().expect("index does not exist");
                     self.global_idx = e_idx.clone() as LogIndex;
 
@@ -164,25 +185,31 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                         continue;
                     }
 
+                    // report to pre update callbakcs
                     for cb in self.pre_callbacks.iter_mut() {
                         let e = e.clone();
                         cb(e);
                     }
 
-
+                    // report updates to callbacks
                     for op in &e.operations {
-                        // every operation is a write of sorts
-                        *(self.version.get_mut(&op.obj_id).expect("version for object must exist")) += 1;
+                        // every operation is a write, so we update object version
+                        *(self.version
+                              .get_mut(&op.obj_id)
+                              .expect("version for object must exist")) += 1;
 
                         if !self.obj_ids.contains(&op.obj_id) {
                             // entry also has operation on object not tracked
                             continue;
                         }
+
                         let obj_id = op.obj_id;
                         match op.operator {
                             LogOp::Op(ref operator) => {
-                                // operation on tracked object sent to interested ds
-                                let mut callbacks = self.callbacks.get_mut(&obj_id).expect("callbacks for object must exist");
+                                // operation on tracked object sent to interested data structure
+                                let mut callbacks = self.callbacks
+                                                        .get_mut(&obj_id)
+                                                        .expect("callbacks for object must exist");
                                 let dec_operator = operator.clone();
                                 for c in callbacks.iter_mut() {
                                     c(e_idx, Operation::new(obj_id, dec_operator.clone()));
@@ -195,11 +222,13 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                         }
                     }
 
+                    // report to post update callbacks
                     for cb in self.post_callbacks.iter_mut() {
                         let e = e.clone();
                         cb(e);
                     }
 
+                    // return to client waiting on current log entry
                     if same_idx {
                         return e.tx_state.clone();
                     }
@@ -208,11 +237,15 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                     self.global_idx = s.idx as LogIndex;
 
                     if !self.obj_ids.contains(&s.obj_id) {
+                        // not interested in received snapshot
                         continue;
                     }
+
                     let obj_id = s.obj_id;
                     let idx = s.idx;
-                    let callbacks = self.callbacks.get_mut(&obj_id).expect("snapshot callback must exist");
+                    let callbacks = self.callbacks
+                                        .get_mut(&obj_id)
+                                        .expect("snapshot callback must exist");
                     let snapshot = s.payload;
                     for c in callbacks.iter_mut() {
                         c(idx, Operation::from_snapshot(obj_id, snapshot.clone()));
@@ -224,6 +257,8 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         return TxState::None;
     }
 
+    // Method: catch_up, Blocking
+    // Syncs state of obj_id and reports updates via callback c
     pub fn catch_up(&mut self, obj_id: ObjId, mut c: &mut Box<Callback>) {
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
         let rx = self.iq.stream(&vec![obj_id].into_iter().collect(),
@@ -259,6 +294,8 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         }
     }
 
+    // Method: register_object
+    // Registers obj_id in runtime and sync sobject to most recent state
     pub fn register_object(&mut self, obj_id: ObjId, mut c: Box<Callback>) {
         self.obj_ids.insert(obj_id);
         if !self.version.contains_key(&obj_id) {

@@ -1,5 +1,19 @@
 // smr/ds.rs
 // State Machine Replicated Data Structures
+// General rules:
+// Read:
+// * sync state through runtime
+// * return data from local data structure
+// Write:
+// * pack write as a data-structure specific WriteOp
+// * convert operation "to" state runtime can access
+//   (eg. encode + encrypt operations can be done through converters)
+// * append operation to SharedLog through runtime
+// Callback:
+// * distinguish between encrypted + encoded operations, encoded opertions and snapshots
+// * convert operation/ snapshot "from" state returned by runtime
+//   (eg. decrypt + decode operations can be done through converters)
+// * apply operation/ snapshot to local data structure
 
 extern crate rustc_serialize;
 use self::rustc_serialize::json;
@@ -13,6 +27,8 @@ use converters::{ConvertersLib, AddableConverter};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::ops::Add;
 
+// Unencrypted Register/ Counter, to be used by client
+// Supports Additive Homomorphic Encryption
 pub type IntRegister<Q> = Register<Q, i32>;
 
 impl<Q> IntRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
@@ -29,6 +45,8 @@ impl<Q> IntRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
     }
 }
 
+// Encrypted Register/ Counter, to be used by VM
+// Supports Additive Homomorphic Encryption
 pub type AddableRegister<Q> = Register<Q, Addable>;
 
 impl<Q> AddableRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
@@ -48,14 +66,18 @@ impl<Q> AddableRegister<Q> where Q: 'static + IndexedQueue + Send + Clone
     }
 }
 
+// Class: Register
+// Parametrized by:
+// * Q : structure allowing seamless communicating with Shared Log
+// * I : Data Type stored in Register
 #[derive(Clone)]
 pub struct Register<Q, I> {
-    runtime: Option<Arc<Mutex<Runtime<Q>>>>,
-    obj_id: i32,
-    pub data: Arc<Mutex<I>>,
+    runtime: Option<Arc<Mutex<Runtime<Q>>>>, // runtime object is registered with
+    obj_id: i32, // unique id
+    pub data: Arc<Mutex<I>>, // local data structure
 
-    convert: Option<AddableConverter<I>>,
-    secure: Option<MetaEncryptor>,
+    convert: Option<AddableConverter<I>>, // converters between data states
+    secure: Option<MetaEncryptor>, // structure to allow use of existing Encryptors/ Decryptors
 }
 
 impl<Q, I: Decodable> Decodable for Register<Q, I> {
@@ -116,6 +138,7 @@ impl<Q, I> Register<Q, I>
     where Q: 'static + IndexedQueue + Send + Clone,
           I: 'static + Encodable + Decodable + Send + Clone + Add<Output = I>
 {
+    // lock runtime, call f with runtime, release lock
     fn with_runtime<R, T, F>(&self, f: F) -> T
         where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
     {

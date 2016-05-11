@@ -21,6 +21,8 @@ pub enum MapOp<K, V> {
     },
 }
 
+// Unencrypted StringHMap, to be used by client
+// Supports Eqable encryption for keys, AES encryption for values
 pub type StringHMap<Q> = HMap<String, String, Q>;
 impl<Q> StringHMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
@@ -37,7 +39,8 @@ impl<Q> StringHMap<Q> {
     }
 }
 
-
+// Encrypted StringHMap, to be used by VM
+// Supports Eqable encryption for keys, AES encryption for values
 pub type EncHMap<Q> = HMap<Eqable, Encrypted, Q>;
 impl<Q> EncHMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
@@ -54,16 +57,20 @@ impl<Q> EncHMap<Q> {
     }
 }
 
+// Class: HMap
+// Parametrized by:
+// * K : key type
+// * V : value type
+// * Q : structure allowing seamless communicating with Shared Log
 #[derive(Clone)]
 pub struct HMap<K, V, Q> {
-    runtime: Option<Arc<Mutex<Runtime<Q>>>>,
-    obj_id: i32,
+    runtime: Option<Arc<Mutex<Runtime<Q>>>>, // runtime object is registered with
+    obj_id: i32, // unique id
+    pub data: Arc<Mutex<HashMap<K, V>>>, // local data structure
 
-    convert_eq: Option<EqableConverter<K>>,
-    convert: Option<Converter<V>>,
-
-    secure: Option<MetaEncryptor>,
-    pub data: Arc<Mutex<HashMap<K, V>>>,
+    convert_eq: Option<EqableConverter<K>>, // converter between data states
+    convert: Option<Converter<V>>, // convert between data states
+    secure: Option<MetaEncryptor>, // structure to allow use of existing Encryptors/ Decryptors
 }
 
 impl<K, V, Q> Decodable for HMap<K, V, Q>
@@ -96,7 +103,6 @@ impl<K, V, Q> Encodable for HMap<K, V, Q>
     }
 }
 
-// TODO: see if worth it to 'inherit' from more generic Map
 impl<K, V, Q> HMap<K, V, Q> {
     pub fn from(aruntime: &Arc<Mutex<Runtime<Q>>>,
                 obj_id: i32,
@@ -127,12 +133,12 @@ impl<K, V, Q> HMap<K, V, Q> {
     }
 }
 
-
 impl<K, V, Q> HMap<K, V, Q>
     where K: 'static + Send + Clone + Encodable + Decodable + Hash + Eq,
           V: 'static + Send + Clone + Encodable + Decodable,
           Q: 'static + IndexedQueue + Send + Clone
 {
+    // lock runtime, call f with runtime, release lock
     fn with_runtime<R, T, F>(&self, f: F) -> T
         where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
     {
@@ -165,6 +171,7 @@ impl<K, V, Q> HMap<K, V, Q>
 
     pub fn insert(&mut self, k: K, v: V) {
         self.with_runtime::<(), _, _>(|mut runtime| {
+            // convert key and value to shared log state
             let key = self.convert_eq
                           .as_ref()
                           .map(|convert_eq| {
@@ -189,6 +196,7 @@ impl<K, V, Q> HMap<K, V, Q>
     }
 
     pub fn get_val(&self, val: Encrypted) -> V {
+        // convert value from shared log state to local state
         self.convert
             .as_ref()
             .map(|convert| {
@@ -199,6 +207,7 @@ impl<K, V, Q> HMap<K, V, Q>
     }
 
     pub fn get_key(&self, key: Eqable) -> K {
+        // convert key from shared log state to local state
         self.convert_eq
             .as_ref()
             .map(|convert_eq| {
@@ -237,6 +246,8 @@ impl<K, V, Q> HMap<K, V, Q>
     }
 }
 
+// Unencrypted StringBTMap, to be used by client
+// Supports Ordable encryption for keys, AES encryption for values
 pub type StringBTMap<Q> = BTMap<String, String, Q, Ordable, Encrypted>;
 impl<Q> StringBTMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
@@ -253,6 +264,8 @@ impl<Q> StringBTMap<Q> {
     }
 }
 
+// Encrypted StringBTMap, to be used by VM
+// Supports Ordable encryption for keys, AES encryption for values
 pub type EncBTMap<Q> = BTMap<Ordable, Encrypted, Q, Ordable, Encrypted>;
 impl<Q> EncBTMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
@@ -269,6 +282,8 @@ impl<Q> EncBTMap<Q> {
     }
 }
 
+// Unencrypted StringBTMap, to be used by benchmark
+// Encryption is replaced by identity function
 pub type UnencBTMap<Q> = BTMap<String, String, Q, String, String>;
 impl<Q> UnencBTMap<Q> {
     pub fn new(aruntime: &Arc<Mutex<Runtime<Q>>>,
@@ -286,6 +301,13 @@ impl<Q> UnencBTMap<Q> {
 }
 
 
+// Class: BTMap
+// Parametrized by:
+// * K : key type
+// * V : value type
+// * Q : structure allowing seamless communicating with Shared Log
+// * KE : encrypted key type
+// * VE : encrypted value type
 #[derive(Clone)]
 pub struct BTMap<K, V, Q, KE, VE> {
     runtime: Option<Arc<Mutex<Runtime<Q>>>>,
@@ -361,6 +383,7 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
           KE: 'static + Ord + Send + Clone + Encodable + Decodable + Debug,
           VE: 'static + Send + Clone + Encodable + Decodable + Debug
 {
+    // lock runtime, call f with runtime, release lock
     fn with_runtime<R, T, F>(&self, f: F) -> T
         where F: FnOnce(MutexGuard<Runtime<Q>>) -> T
     {
@@ -391,8 +414,8 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
         })
     }
 
-    // modfies local map without syncing to log
     // use only for testing map is in order
+    // modfies local map without syncing to log
     pub fn pop_first(&mut self) -> Option<(K, V)> {
         self.with_runtime::<K, _, _>(|mut runtime| {
             runtime.sync(Some(self.obj_id));
@@ -416,6 +439,7 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
     }
 
     pub fn get_val(&self, val: VE) -> V {
+        // convert value from shared log state to local state
         self.convert
             .as_ref()
             .map(|convert| {
@@ -426,6 +450,7 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
     }
 
     pub fn get_key(&self, key: KE) -> K {
+        // convert key from shared log state to local state
         self.convert_ord
             .as_ref()
             .map(|convert_ord| {
@@ -436,8 +461,8 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
     }
 
     pub fn insert(&mut self, k: K, v: V) {
-        // println!("map.insert debug k {:?}, v{:?}", k, v);
         self.with_runtime::<(), _, _>(|mut runtime| {
+            // convert key and value to shared log state
             let key = self.convert_ord
                           .as_ref()
                           .map(|convert_ord| {
@@ -452,7 +477,6 @@ impl<K, V, Q, KE, VE> BTMap<K, V, Q, KE, VE>
                               to(&self.secure, v)
                           })
                           .unwrap();
-            // println!("map.insert key = {:?}, val {:?}", key, val);
             let encrypted_op = MapOp::Insert {
                 key: key,
                 val: val,

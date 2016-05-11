@@ -52,10 +52,6 @@ impl RingInt {
 pub type Addable = RingInt;
 
 impl Addable {
-    // pub fn new(i: Int, m: Int) -> Addable {
-    //    Addable { i: i, m: m }
-    // }
-
     pub fn default(pk: PublicKey) -> Addable {
         Addable {
             i: pk.encrypt(&Int::from(0)),
@@ -79,10 +75,14 @@ impl Add for Addable {
     }
 }
 
+// Class: AddEncryptor
+// Implements the Paillier encryption scheme,
+// (a probabilistic, asymmetric, public key, encryption scheme)
 #[derive(Clone)]
 pub struct AddEncryptor {
-    key_pair: KeyPair,
+    key_pair: KeyPair, // public and private key pair
 }
+
 impl AddEncryptor {
     pub fn new() -> AddEncryptor {
         AddEncryptor { key_pair: KeyPairBuilder::new().bits(128).finalize() }
@@ -100,8 +100,6 @@ impl AddEncryptor {
         return s.parse::<R>();
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct Ordable {
@@ -131,7 +129,6 @@ impl Decodable for Ordable {
         });
     }
 }
-
 
 impl PartialEq for Ordable {
     fn eq(&self, other: &Ordable) -> bool {
@@ -236,8 +233,8 @@ impl Encrypted {
 
 #[derive(RustcEncodable, RustcDecodable, Clone, Debug)]
 pub struct Eqable {
-    hash: Vec<u8>,
-    encrypted: Encrypted,
+    hash: Vec<u8>, // one way hash
+    encrypted: Encrypted, // deterministic encryption
 }
 
 impl Hash for Eqable {
@@ -265,9 +262,13 @@ impl Eqable {
     }
 }
 
+// Class: EqEncryptor
+// Implements equable encryption
+// A one-way hash function, produces a hash used for equality comparision
+// A reversible encryptor encrypts data
 #[derive(Clone)]
 pub struct EqEncryptor {
-    encryptor: Encryptor,
+    encryptor: Encryptor, // deterministic encryption
 }
 
 impl EqEncryptor {
@@ -283,6 +284,8 @@ impl EqEncryptor {
     }
 }
 
+// Class: Encryptor
+// Implements AES encryption, CBC mode, 256 bit key
 #[derive(Clone)]
 pub struct Encryptor {
     key: Vec<u8>,
@@ -322,6 +325,9 @@ impl Encryptor {
     }
 }
 
+// Class: MetaEncryptor
+// Collection of implemented encryptors to allow structured access
+// from data structures
 #[derive(Clone)]
 pub struct MetaEncryptor {
     pub eq: EqEncryptor,
