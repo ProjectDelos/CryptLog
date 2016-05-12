@@ -3,27 +3,36 @@ package main
 import (
 	"encoding/json"
 	"errors"
-)
-import "flag"
-import "fmt"
-import "log"
-import "net"
-import "reflect"
-import "strconv"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"reflect"
+	"strconv"
+	"time"
 
-import "github.com/aws/aws-sdk-go/aws"
-import "github.com/aws/aws-sdk-go/aws/awserr"
-import "github.com/aws/aws-sdk-go/aws/session"
-import "github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+)
 
 var svc *dynamodb.DynamoDB
 var table string
 var testMode bool
 
+const (
+	LogLength = "logLength"
+	Data      = "data"
+	Index     = "index"
+)
+
 func init() {
 	flag.BoolVar(&testMode, "test", false, "run on test table")
 	ses := session.New(&aws.Config{Region: aws.String("us-west-2")})
 	svc = dynamodb.New(ses, aws.NewConfig().WithRegion("us-west-2"))
+	table = "cryptlog_test"
+	testMode = true
 }
 
 type dbEntry struct {
@@ -32,29 +41,29 @@ type dbEntry struct {
 }
 
 func dbEntryFromItem(item map[string]*dynamodb.AttributeValue) (dbEntry, error) {
-	if item["index"] == nil {
+	if item[Index] == nil {
 		return dbEntry{-1, ""}, errors.New("Entry does not exist")
 	}
 
-	index, err := strconv.ParseInt(*item["index"].N, 10, 64)
+	index, err := strconv.ParseInt(*item[Index].N, 10, 64)
 	if err != nil {
 		log.Panicf("error parsing dbEntry: %s\n", err)
 	}
 
 	return dbEntry{
 		Index: index,
-		Data:  *item["data"].S,
+		Data:  *item[Data].S,
 	}, err
 }
 
 func lengthFromItem(item map[string]*dynamodb.AttributeValue) (int64, error) {
-	if item["QueueLength"] == nil {
+	if item[LogLength] == nil {
 		return 0, nil
 	}
 
-	length, err := strconv.ParseInt(*item["QueueLength"].N, 10, 64)
+	length, err := strconv.ParseInt(*item[LogLength].N, 10, 64)
 	if err != nil {
-		log.Panicf("error parsing QueueLength: %s\n", err)
+		log.Panicf("error parsing LogLength: %s\n", err)
 	}
 
 	return length, err
@@ -65,7 +74,7 @@ func del(index int64) error {
 	// i := "index"
 	params := &dynamodb.DeleteItemInput{
 		Key: map[string]*dynamodb.AttributeValue{
-			"index": {N: aws.String(strconv.FormatInt(index, 10))},
+			Index: {N: aws.String(strconv.FormatInt(index, 10))},
 		},
 		TableName: aws.String(table),
 	}
@@ -78,7 +87,7 @@ func get(index int64) (string, error) {
 	log.Println("GETTING: ", index)
 	params := &dynamodb.GetItemInput{
 		Key: map[string]*dynamodb.AttributeValue{
-			"index": {N: aws.String(strconv.FormatInt(index, 10))},
+			Index: {N: aws.String(strconv.FormatInt(index, 10))},
 		},
 		TableName:      aws.String(table),
 		ConsistentRead: aws.Bool(true),
@@ -99,22 +108,25 @@ func get(index int64) (string, error) {
 	return entry.Data, err
 }
 
-func put(index int64, data string, conditional bool) (error, bool) {
+// return the index where it was added
+func put(index int64, data string, conditional bool) (int64, error) {
 	log.Println("PUT:", index, data, conditional)
-	i := "index"
+retry:
+	i := Index
 	params := &dynamodb.PutItemInput{
 		TableName: aws.String(table), // Required
 		Item: map[string]*dynamodb.AttributeValue{
-			"index": {N: aws.String(strconv.FormatInt(index, 10))},
-			"data":  {S: aws.String(data)},
+			Index: {N: aws.String(strconv.FormatInt(index, 10))},
+			Data:  {S: aws.String(data)},
 		},
 	}
 	if conditional {
 		params.ExpressionAttributeNames = map[string]*string{
-			"#index": &i,
+			"#" + Index: &i,
 		}
 		params.ConditionExpression = aws.String("attribute_not_exists(#index)")
 	}
+
 	resp, err := svc.PutItem(params)
 
 	if err != nil {
@@ -122,26 +134,28 @@ func put(index int64, data string, conditional bool) (error, bool) {
 		// Message from an error.
 		if ae, ok := err.(awserr.RequestFailure); ok {
 			if ae.Code() == "ConditionalCheckFailedException" {
-				log.Println("Failed conditional check: caught:", resp, err)
-				return err, true
+				// try the next index
+				index += 1
+				goto retry
 			}
 		}
 		log.Println("PUT: ERR:", reflect.TypeOf(err), err.Error())
-		return err, false
+		return -1, err
 	}
 	log.Println("PUT: RESP:", resp)
-	return nil, false
+	err = updateLength()
+	return index, err
 }
 
 func updateLength() error {
 	params := &dynamodb.UpdateItemInput{
 		TableName: aws.String(table),
 		Key: map[string]*dynamodb.AttributeValue{
-			"QueueLength": {
-				S: aws.String("QueueLength"),
+			LogLength: {
+				S: aws.String(LogLength),
 			},
 		},
-		UpdateExpression: aws.String("ADD Length 1"),
+		UpdateExpression: aws.String("ADD " + LogLength + " 1"),
 	}
 	_, err := svc.UpdateItem(params)
 
@@ -158,8 +172,8 @@ func length() (int64, error) {
 	log.Println("Getting Length")
 	params := &dynamodb.GetItemInput{
 		Key: map[string]*dynamodb.AttributeValue{
-			"QueueLength": {
-				S: aws.String("QueueLength"),
+			LogLength: {
+				S: aws.String(LogLength),
 			},
 		},
 		TableName:      aws.String(table),
@@ -178,6 +192,52 @@ func length() (int64, error) {
 	return l, nil
 }
 
+func reset() {
+	params := &dynamodb.DeleteTableInput{
+		TableName: aws.String(table), // Required
+	}
+
+	_, err := svc.DeleteTable(params)
+	if err != nil {
+		log.Println("Failed to delete table: ", err)
+	}
+	time.Sleep(2 * time.Second)
+
+	create := &dynamodb.CreateTableInput{
+		TableName: aws.String(table),
+		KeySchema: []*dynamodb.KeySchemaElement{
+			{
+				AttributeName: aws.String(Index),
+				KeyType:       aws.String("RANGE"),
+			},
+		},
+		ProvisionedThroughput: &dynamodb.ProvisionedThroughput{ // Required
+			ReadCapacityUnits:  aws.Int64(5), // Required
+			WriteCapacityUnits: aws.Int64(5), // Required
+		},
+		AttributeDefinitions: []*dynamodb.AttributeDefinition{ // Required
+			{
+				AttributeName: aws.String(Index),
+				AttributeType: aws.String("N"),
+			},
+			{
+				AttributeName: aws.String(LogLength),
+				AttributeType: aws.String("S"),
+			},
+			{
+				AttributeName: aws.String(Data),
+				AttributeType: aws.String("S"),
+			},
+			// More values...
+		},
+	}
+	_, err = svc.CreateTable(create)
+	if err != nil {
+		log.Fatal("Failed to create table: ", err)
+	}
+	time.Sleep(2 * time.Second)
+}
+
 // RequestType is the type of request
 type RequestType int64
 
@@ -187,6 +247,7 @@ const (
 	Get                = 1
 	Delete             = 2
 	Length             = 3
+	Reset              = 4
 )
 
 // Request for log
@@ -228,26 +289,19 @@ func handleConnection(conn net.Conn) {
 
 		switch req.RequestType {
 		case Put:
-			var valErr bool
-			for {
-				err, valErr = put(req.Index, req.Data, req.Conditional)
-				// there was a validation error
-				if err != nil && !valErr {
-					break
-				}
-				// it was successful
-				if err == nil {
-					break
-				}
-				// it was a validation error: try the next index
-				req.Index++
-				resp.Index++
+			var idx int64
+			idx, err = put(req.Index, req.Data, req.Conditional)
+			// there was a validation error
+			if err == nil {
+				req.Index = idx
+				resp.Index = idx
+			}
+
+			// it was successful
+			if err != nil {
+				log.Println("ERROR Putting")
 			}
 			resp.ValidationErr = false
-			if err != nil {
-				// update the length field of the queue
-				err = updateLength()
-			}
 		case Get:
 			var data string
 			data, err = get(req.Index)
@@ -258,6 +312,8 @@ func handleConnection(conn net.Conn) {
 			var l int64
 			l, err = length()
 			resp.Length = l
+		case Reset:
+			reset()
 		}
 		if err != nil {
 			resp.Err = err.Error()
@@ -268,9 +324,8 @@ func handleConnection(conn net.Conn) {
 
 func main() {
 	flag.Parse()
-	table = "cryptlog"
-	if testMode {
-		table = "cryptlog_test"
+	if !testMode {
+		table = "cryptlog"
 	}
 	ln, err := net.Listen("tcp", ":8080")
 	if err != nil {
