@@ -13,9 +13,9 @@ pub type EntryCallback = FnMut(Entry) + Send;
 pub struct Runtime<Q> {
     iq: Q, // structure allowing seamless communicating with Shared Log
 
-    callbacks: HashMap<ObjId, Vec<Box<Callback>>>,
-    pre_callbacks: Vec<Box<EntryCallback>>,
-    post_callbacks: Vec<Box<EntryCallback>>,
+    callbacks: HashMap<ObjId, Vec<Box<Callback>>>, // main callbacks
+    pre_callbacks: Vec<Box<EntryCallback>>, // pre 'main callbacks' callbacks, used by VM
+    post_callbacks: Vec<Box<EntryCallback>>, // post 'main callbacks' callbacks, used by VM
     pub global_idx: LogIndex, // index of last SharedLog entry synced
     obj_ids: HashSet<ObjId>, // ids of objectes registered with runtime
 
@@ -32,14 +32,11 @@ pub struct Runtime<Q> {
 impl<Q> Drop for Runtime<Q> {
     fn drop(&mut self) {
         self.stop();
-        // println!("DROPPING RUNTIME");
     }
 }
 
 impl<Q> Runtime<Q> {
     pub fn stop(&mut self) {
-        // println!("Clearing Runtime");
-
         self.callbacks.clear();
         self.pre_callbacks.clear();
         self.post_callbacks.clear();
@@ -51,7 +48,6 @@ impl<Q> Runtime<Q> {
         self.operations.clear();
 
         self.secure.take();
-        // println!("Runtime Cleared");
     }
 }
 
@@ -289,7 +285,6 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                     }
                 }
                 Ok(LogSnapshot(s)) => {
-                    println!("got snap");
                     let snapshot = s.payload;
                     (*c)(s.idx, Operation::from_snapshot(obj_id, snapshot));
                 }

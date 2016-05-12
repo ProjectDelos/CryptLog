@@ -169,7 +169,6 @@ impl InMemoryQueue {
 impl IndexedQueue for InMemoryQueue {
     fn append(&mut self, mut e: Entry) -> LogIndex {
         e.idx = Some(self.q.len() as LogIndex);
-        // println!("InMemoryQueue::append {:?}", e);
         self.q.push_back(e);
         return (self.q.len() - 1) as LogIndex;
     }
@@ -226,7 +225,6 @@ impl IndexedQueue for SharedQueue {
 }
 
 fn randomize(x: u64, n: u64, d: u64) -> u64 {
-    // println!("{} {} {}", x, n, d);
     if x == 0 {
         return x;
     }
@@ -234,12 +232,10 @@ fn randomize(x: u64, n: u64, d: u64) -> u64 {
     if m == 0 {
         return x;
     }
-    // println!("{}", m);
     let r = (rand::random::<i32>() as i64) % (m * 2);
     let diff = r - m;
     // +/- 50%
     let out = ((x as i64) + diff) as u64;
-    // println!("{}", out);
     out
 }
 
@@ -334,12 +330,6 @@ pub struct HttpClient {
 impl Clone for HttpClient {
     fn clone(&self) -> HttpClient {
         HttpClient::with_delay(&self.to_server, self.delay)
-    }
-}
-
-impl Drop for HttpClient {
-    fn drop(&mut self) {
-        println!("stopping http client");
     }
 }
 
