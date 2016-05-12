@@ -12,6 +12,10 @@ use self::hyper::server::{Handler, Request, Response, Listening};
 use indexed_queue::{IndexedQueue, LogData};
 use http_data::{HttpRequest, HttpResponse};
 
+// Class: HttpServer
+// Handles connections to the SharedLog
+// Parametrized by:
+// * Q : structure allowing seamless communicating with Shared Log
 pub struct HttpServer<Q: 'static> {
     iq: Q,
     listener: Listening,

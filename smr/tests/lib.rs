@@ -17,6 +17,7 @@ use std::time::Duration;
 use std::thread;
 
 
+// Writes to register and streams from VM, checks that in == out
 #[test]
 fn vm_streaming_test() {
     let q = SharedQueue::new();
@@ -29,7 +30,7 @@ fn vm_streaming_test() {
                                    obj_id,
                                    Addable::default(add_encryptor.public_key()));
     let vm_reg = reg.clone();
-    let mut snapshot_reg = reg.clone();
+    let mut snapshot_reg = reg;
     // register the Register with the VM
     vm.register_object(0, Box::new(move |_, e| snapshot_reg.callback(e)), vm_reg);
     vm.start();
@@ -60,6 +61,7 @@ fn vm_streaming_test() {
     assert_eq!(i, 10);
 }
 
+// Writes to registers enough to lead to snapshotting, checks VM aggregated them into snapshot
 #[test]
 fn vm_full() {
     let q = SharedQueue::new();
@@ -108,10 +110,10 @@ fn vm_full() {
     assert_eq!(i, 50);
     thread::sleep(Duration::new(1, 0));
     assert_eq!(reg.read(), 149);
-    // Now try to recover new register from VM: needs snapshots
 }
 
-
+// Many writes to VM through 2 registers, corresponding to 2 object ids
+// Recovers then in 2 new registers with the same 2 object ids
 #[test]
 fn register_integration_tests() {
     let q = SharedQueue::new();
@@ -152,9 +154,7 @@ fn register_integration_tests() {
 
 
     // EXECUTE TONS OF WRITES
-    let rounds = 266;
-    // reg1: 0 -> 1000
-    // reg2: 1 -> 2000
+    let rounds = 106; // rounds > NENTRIES_PER_SNAPSHOT
     println!("Writing to registers");
     for _ in 0..rounds {
         reg1.inc(1);
@@ -163,15 +163,7 @@ fn register_integration_tests() {
     println!("Done writing to registers");
     assert_eq!(reg1.read(), rounds);
     assert_eq!(reg2.read(), rounds * 2);
-    // check register values correctly read in new views
-    // let mut reg1b = IntRegister::new(&aruntime, 1 as ObjId, 0);
-    // reg1b.start();
-    // let mut reg2b = IntRegister::new(&aruntime, 2 as ObjId, 1);
-    // reg2b.start();
-    // assert_eq!(reg1b.read(), rounds);
-    // assert_eq!(reg2b.read(), rounds * 2 + 1);
-    // println!("Done reading registers");
-    //
+
     // wait for the VM to catch up
     thread::sleep(Duration::from_millis(200));
     // check if registers can recover from the vm
@@ -192,6 +184,7 @@ fn register_integration_tests() {
     // Ensure that a snapshot was used
     // Changing the initial value of a register should not make a difference since it
     // should use a snapshot and overwrite the state of the register.
+    // If this test fails also check that Snapshotter is set to snapshot at right granularity
     println!("Starting VM Register with different initial value");
     let mut meta_reg12 = IntRegister::new(&a_meta_runtime, 1 as ObjId, 100);
     println!("Starting");
@@ -239,7 +232,7 @@ fn btmap_integration_tests() {
     btmap1.start();
     btmap2.start();
 
-    // Execute many writes
+    // Execute many writes (of same key value pairs)
     println!("Execute map writes");
     let keys = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
     let vals = vec!["h0", "h1", "h2", "alphabet", "h0rry"];
@@ -290,7 +283,6 @@ fn btmap_integration_tests() {
         assert_eq!(val2, vals2[should_be_at[i]]);
     }
 }
-
 #[test]
 fn hmap_integration_tests() {
     let q = SharedQueue::new();

@@ -1,3 +1,8 @@
+// Implementation of ORE/ OPE as described in:
+// Chenette, Nathan, et al. “Practical Order-Revealing Encryption with Limited Leakage.”
+// Implementation of GGM method of constructing a random function from a PRNG as described in:
+// https://crypto.stanford.edu/pbc/notes/crypto/prf.html
+
 extern crate rand;
 extern crate ramp;
 
@@ -7,7 +12,38 @@ use self::rand::{SeedableRng, IsaacRng};
 use self::ramp::{Int, RandomInt};
 
 use encryptors::RingInt;
+pub type OrdInt = RingInt; // big int type used in ORE/ OPE
 
+impl PartialEq for OrdInt {
+    fn eq(&self, other: &OrdInt) -> bool {
+        self.i == other.i
+    }
+}
+
+impl Eq for OrdInt {}
+
+impl PartialOrd for OrdInt {
+    fn partial_cmp(&self, other: &OrdInt) -> Option<Ordering> {
+        if self.eq(other) {
+            return Some(Ordering::Equal);
+        }
+        let (_, ip1) = (&self.i + Int::one()).divmod(&self.m);
+        if ip1 == other.i {
+            return Some(Ordering::Less);
+        }
+        Some(Ordering::Greater)
+    }
+}
+
+impl Ord for OrdInt {
+    fn cmp(&self, other: &OrdInt) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
+pub type OrdData = Vec<OrdInt>;
+
+// trait implemented by types that allow traversal bit by bit
 pub trait BitTraversable {
     fn next_bit(&mut self) -> bool;
     fn bit_len(&mut self) -> usize;
@@ -40,11 +76,14 @@ impl BitTraversable for Vecu8Traversable {
     }
 }
 
+// Class: Vecu8Traversable
+// a vector of characters to be traversed bit by bit
 #[derive(Clone)]
 pub struct Vecu8Traversable {
-    pub bt: Vec<u8>,
-    count: u8,
+    pub bt: Vec<u8>, // array of bytes/ characters
+    count: u8, // for current byte being traversed, the bit position we are on
 }
+
 impl Vecu8Traversable {
     pub fn new(bt: &[u8]) -> Vecu8Traversable {
         let mut bt = Vec::from(bt);
@@ -53,13 +92,18 @@ impl Vecu8Traversable {
     }
 }
 
+// PseudoRandom Number Generator, parmetrized by seed S
 pub trait PRNG<S> {
     // expands randomness by a factor of 2
     fn next(&self, s: S) -> (S, S);
 }
 
-// random function created from pseudo random number generator P
-// and individually applied to each bit in T
+// Class: RandomFn
+// Random function constructed from a pseudo random number generator P
+// to be individually applied to each bit in T
+// Parametrized by:
+// * P : a PRNG
+// * T : a type that allows bit traversal
 #[derive(Clone)]
 pub struct RandomFn<P: PRNG<Int>, T: BitTraversable> {
     prng: P,
@@ -67,49 +111,6 @@ pub struct RandomFn<P: PRNG<Int>, T: BitTraversable> {
     m: Int,
     pd: PhantomData<T>,
 }
-
-// #[derive(Clone, Debug)]
-// pub struct OrdInt {
-//    i: Int,
-//    m: Int,
-// }
-
-pub type OrdInt = RingInt;
-// impl OrdInt {
-// pub fn new(i: Int, m: Int) -> OrdInt {
-// OrdInt { i: i, m: m }
-// }
-// }
-//
-
-impl PartialEq for OrdInt {
-    fn eq(&self, other: &OrdInt) -> bool {
-        self.i == other.i
-    }
-}
-
-impl Eq for OrdInt {}
-
-impl PartialOrd for OrdInt {
-    fn partial_cmp(&self, other: &OrdInt) -> Option<Ordering> {
-        if self.eq(other) {
-            return Some(Ordering::Equal);
-        }
-        let (_, ip1) = (&self.i + Int::one()).divmod(&self.m);
-        if ip1 == other.i {
-            return Some(Ordering::Less);
-        }
-        Some(Ordering::Greater)
-    }
-}
-
-impl Ord for OrdInt {
-    fn cmp(&self, other: &OrdInt) -> Ordering {
-        self.partial_cmp(other).unwrap()
-    }
-}
-
-pub type OrdData = Vec<OrdInt>;
 
 impl<P: PRNG<Int>, BT: BitTraversable + Clone> RandomFn<P, BT> {
     pub fn new(prng: P, key: Int, m: Int) -> RandomFn<P, BT> {
@@ -169,7 +170,7 @@ impl PRNG<Int> for RandomIntPRNG {
     fn next(&self, s: Int) -> (Int, Int) {
         let mut s = s;
 
-        // seed as 4 integers
+        // represent seed as 4 integers
         let mut seed: Vec<u32> = Vec::new();
         let p32 = Int::from(2).pow(32);
         let mask = &p32 - Int::one();
@@ -179,6 +180,7 @@ impl PRNG<Int> for RandomIntPRNG {
             s = (&s) / (&p32);
         }
 
+        // seed the prng
         let mut rng: IsaacRng = SeedableRng::from_seed(seed.as_ref());
         let g0 = rng.gen_int(128);
         let g1 = rng.gen_int(128);
@@ -198,6 +200,7 @@ mod test {
 
     #[test]
     fn use_next_bit() {
+        // test bit traversal of s0 and s1
         let mut s0 = Vecu8Traversable::new(&String::from("h0").into_bytes());
         let mut s1 = Vecu8Traversable::new(&String::from("h1").into_bytes());
 

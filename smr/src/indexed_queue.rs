@@ -11,7 +11,6 @@ use std::time::Duration;
 use std::thread;
 
 use self::hyper::Client;
-// use self::hyper::client::response::Response;
 use self::hyper::header::Connection;
 use std::net::TcpStream;
 use std::io::{Read, Bytes};
@@ -32,16 +31,22 @@ pub enum State {
     Encoded(String),
 }
 
+// Enum: LogOp
+// Log Operator, a wrapper arund a snapshot or data structure operator
+// to be used in communication with Shared Log
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
 pub enum LogOp {
-    Snapshot(State),
-    Op(State),
+    Snapshot(State), // snapshot in an encoded/ encrypted state
+    Op(State), // data structure operator in an encoded/ encrypted state
 }
 
+// Class: Operation
+// Wrapper around an object id and a log operator
+// to be used in communication with Shared Log
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
 pub struct Operation {
-    pub obj_id: ObjId, // hard coded
-    pub operator: LogOp,
+    pub obj_id: ObjId, // id of object responsible for operation
+    pub operator: LogOp, // data structure operator
 }
 
 impl Operation {
@@ -51,10 +56,10 @@ impl Operation {
             operator: LogOp::Op(operator),
         }
     }
-    pub fn from_snapshot(obj_id: ObjId, operator: State) -> Operation {
+    pub fn from_snapshot(obj_id: ObjId, snap: State) -> Operation {
         Operation {
             obj_id: obj_id,
-            operator: LogOp::Snapshot(operator),
+            operator: LogOp::Snapshot(snap),
         }
     }
 }
@@ -68,16 +73,18 @@ pub enum TxType {
 
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone, PartialEq, Eq)]
 pub enum TxState {
-    Accepted,
-    Aborted,
-    None,
+    Accepted, // if found valid
+    Aborted, // if found invalid
+    None, // if not checked yet
 }
 
+// Class: Snapshot
+// Summary of a snapshot from SharedLog
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable)]
 pub struct Snapshot {
-    pub obj_id: ObjId,
-    pub idx: LogIndex,
-    pub payload: State,
+    pub obj_id: ObjId, // id of object snapshotted
+    pub idx: LogIndex, // index of snapshot in log
+    pub payload: State, // encoded/ encrypted payload of snapshot
 }
 
 impl Snapshot {
@@ -90,23 +97,27 @@ impl Snapshot {
     }
 }
 
-
+// Enum: LogData
+// Communication with SharedLog happens via sending LogEntries
+// and receiving LogEntries and LogSnapshots
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable)]
 pub enum LogData {
     LogEntry(Entry),
     LogSnapshot(Snapshot),
 }
 
+// Class: Entry
+// Contains summary of an operation or transaction
 #[derive(RustcDecodable, RustcEncodable, Debug, Clone)]
 pub struct Entry {
-    pub idx: Option<LogIndex>,
+    pub idx: Option<LogIndex>, // index Entry receives in SharedLog, initially None
 
-    pub reads: HashMap<ObjId, LogIndex>,
-    pub writes: HashSet<ObjId>,
-    pub operations: Vec<Operation>,
+    pub reads: HashMap<ObjId, LogIndex>, // map of <object id, version read during transaction>
+    pub writes: HashSet<ObjId>, // set of obj_ids written in current transaction
+    pub operations: Vec<Operation>, // operations to be included in current open transaction, if any
 
-    pub tx_type: TxType,
-    pub tx_state: TxState,
+    pub tx_type: TxType, // transaction type (begin, end, ..)
+    pub tx_state: TxState, // transaction state (accepted, aborted, ..)
 }
 
 impl Entry {
@@ -127,10 +138,14 @@ impl Entry {
     }
 }
 
+// Trait: IndexedQueue
+// To be implemented by structure acting as SharedLog
 pub trait IndexedQueue {
+    // Sends entry to e to log, and returns index at which it was appended
     fn append(&mut self, e: Entry) -> LogIndex;
-    // to is non inclusive
-    // if to is not specified: streams up to the length of the log (as read at the beginning of the function)
+    // Stream entries relevant to the obj_ids, between log entry indicies (from, to)
+    // Note: to is non inclusive
+    // If to is not specified: streams up to the length of the log (as read at the beginning of the function)
     fn stream(&mut self,
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
@@ -138,6 +153,8 @@ pub trait IndexedQueue {
               -> mpsc::Receiver<LogData>;
 }
 
+// Class: InMemoryQueue
+// In memory implementation of an IndexedQueue, to be used by one client
 #[derive(Clone)]
 pub struct InMemoryQueue {
     q: VecDeque<Entry>,
@@ -152,7 +169,6 @@ impl InMemoryQueue {
 impl IndexedQueue for InMemoryQueue {
     fn append(&mut self, mut e: Entry) -> LogIndex {
         e.idx = Some(self.q.len() as LogIndex);
-        // println!("InMemoryQueue::append {:?}", e);
         self.q.push_back(e);
         return (self.q.len() - 1) as LogIndex;
     }
@@ -182,6 +198,8 @@ impl IndexedQueue for InMemoryQueue {
     }
 }
 
+// Class: SharedQueue
+// In memory implementation of an IndexedQueue, can be used by multiple clients
 #[derive(Clone)]
 pub struct SharedQueue {
     q: Arc<Mutex<InMemoryQueue>>,
@@ -207,24 +225,22 @@ impl IndexedQueue for SharedQueue {
 }
 
 fn randomize(x: u64, n: u64, d: u64) -> u64 {
-    //println!("{} {} {}", x, n, d);
     if x == 0 {
         return x;
     }
-    let m : i64 = (x*n/d) as i64;
+    let m: i64 = (x * n / d) as i64;
     if m == 0 {
         return x;
     }
-    //println!("{}", m);
-    let r = (rand::random::<i32>() as i64) % (m*2);
+    let r = (rand::random::<i32>() as i64) % (m * 2);
     let diff = r - m;
     // +/- 50%
     let out = ((x as i64) + diff) as u64;
-    //println!("{}", out);
     out
 }
 
-// TODO Create Contended Queue
+// Class: ContendedQueue
+// In memory implementation of an IndexedQueue, simulates contention
 #[derive(Clone)]
 pub struct ContendedQueue {
     h: Arc<Mutex<HashMap<LogIndex, Entry>>>,
@@ -303,22 +319,17 @@ impl IndexedQueue for ContendedQueue {
     }
 }
 
-
+// Class: HttpClient
+// Interface to remote SharedLog, implements IndexedQueue
 pub struct HttpClient {
-    c: Client,
-    to_server: String,
-    delay: Duration,
+    c: Client, // RustLang http client
+    to_server: String, // server address
+    delay: Duration, // for testing with delays
 }
 
 impl Clone for HttpClient {
     fn clone(&self) -> HttpClient {
         HttpClient::with_delay(&self.to_server, self.delay)
-    }
-}
-
-impl Drop for HttpClient {
-    fn drop(&mut self) {
-        println!("stopping http client");
     }
 }
 
@@ -349,6 +360,7 @@ impl IndexedQueue for HttpClient {
               from: LogIndex,
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
+        // assemble and send request
         let body = json::encode(&HttpRequest::Stream(obj_ids.clone(), from, to)).unwrap();
         thread::sleep(self.delay);
         let mut http_resp = self.c
@@ -357,14 +369,18 @@ impl IndexedQueue for HttpClient {
                                 .body(&body)
                                 .send()
                                 .unwrap();
-
         thread::sleep(self.delay);
-        let (tx, rx) = mpsc::channel();
+
+        // receive response from server
         let mut resp = String::new();
         http_resp.read_to_string(&mut resp).unwrap();
         let resp = json::decode(&resp).unwrap();
+
+        // channel to communicate with requester of stream
+        let (tx, rx) = mpsc::channel();
         match resp {
             HttpResponse::Stream(ref entries) => {
+                // stream one entry at a time
                 for e in entries {
                     tx.send(e.clone()).unwrap();
                 }
@@ -375,7 +391,7 @@ impl IndexedQueue for HttpClient {
     }
 
     fn append(&mut self, e: Entry) -> LogIndex {
-        // let e = json::encode(&e).unwrap();
+        // assemble request
         let e = HttpRequest::Append(e);
         let body = json::encode(&e).expect("error encoding value");
         thread::sleep(self.delay);
@@ -386,11 +402,14 @@ impl IndexedQueue for HttpClient {
                                 .send()
                                 .expect("error getting from server");
         thread::sleep(self.delay);
+
+        // receive response
         let mut resp = String::new();
         http_resp.read_to_string(&mut resp).expect("error reading from response");
         let resp = json::decode(&resp).expect("error decoding http response");
         match resp {
             HttpResponse::Append(idx) => {
+                // return log index at which entry was appended
                 return idx;
             }
             _ => panic!("http_client::append::wrong response type"),
@@ -398,10 +417,12 @@ impl IndexedQueue for HttpClient {
     }
 }
 
+// Class: DynamoQueue
+// Interface with remote SharedLog, implements IndexedQueue
 #[derive(Clone)]
 pub struct DynamoQueue {
-    pub client: Arc<Mutex<DynamoClient>>,
-    index: i64,
+    pub client: Arc<Mutex<DynamoClient>>, // dynamo client
+    index: i64, // our cached end of log index
 }
 
 impl DynamoQueue {
@@ -415,7 +436,6 @@ impl DynamoQueue {
 
 impl IndexedQueue for DynamoQueue {
     fn append(&mut self, e: Entry) -> LogIndex {
-
         let data = json::encode(&e).unwrap();
         loop {
             match self.client.lock().unwrap().put(self.index, &data, true) {
@@ -433,6 +453,7 @@ impl IndexedQueue for DynamoQueue {
         self.index += 1;
         return (self.index - 1) as LogIndex;
     }
+
     fn stream(&mut self,
               obj_ids: &HashSet<ObjId>,
               mut from: LogIndex,
@@ -445,7 +466,7 @@ impl IndexedQueue for DynamoQueue {
         use self::LogData::LogEntry;
         let (tx, rx) = mpsc::channel();
         loop {
-            // stop if we have read up to length or to to
+            // stop if we have read up to length or up to to 'to'
             if from >= length {
                 return rx;
             }
@@ -481,7 +502,6 @@ impl IndexedQueue for DynamoQueue {
     }
 }
 
-
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RequestType {
     Put = 0,
@@ -489,7 +509,6 @@ pub enum RequestType {
     Delete = 2,
     Length = 3,
 }
-
 
 #[derive(Serialize, Deserialize, Debug)]
 struct DynamoRequest {
@@ -516,6 +535,8 @@ pub enum DynamoError {
     Error(String),
 }
 
+// Class: DynamoClient
+// Connects to DynamoDB through a locally run go server
 pub struct DynamoClient {
     ser: serde_json::Serializer<TcpStream>,
     de: serde_json::Deserializer<Bytes<TcpStream>>,
@@ -594,8 +615,6 @@ impl DynamoClient {
         return Ok(resp.length);
     }
 }
-
-
 
 #[cfg(test)]
 mod test {

@@ -1,6 +1,8 @@
 extern crate rustc_serialize;
 extern crate chan;
 
+const NENTRIES_PER_SNAP: usize = 100;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -27,19 +29,28 @@ enum SnapshotOp {
 }
 
 pub trait Skiplist {
+    // Insert obj_id in list of objects tracked by Skiplist
     fn insert(&mut self, obj_id: ObjId);
+    // Append idx to skiplist as relevant to object obj_id
     fn append(&mut self, obj_id: ObjId, idx: LogIndex);
+    // Stream log indicies in (from, to) range
+    // for all entries concerning an object in obj_ids
+    // if to is None, stream from 'from' till the end of the log
     fn stream(&self,
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
               to: Option<LogIndex>)
               -> Vec<LogIndex>;
+    // gc skiplist, if snapshotting makes entries redundant
     fn gc(&mut self, idx: LogIndex);
 }
 
+// Class: MapSkiplist
+// Creates a per object skiplist
+// A skiplist is a list of log indicies relevant to a particular object
 #[derive(Clone)]
 pub struct MapSkiplist {
-    skiplist: Arc<Mutex<HashMap<ObjId, HashSet<LogIndex>>>>,
+    skiplist: Arc<Mutex<HashMap<ObjId, HashSet<LogIndex>>>>, // Map from object_id to skiplist
 }
 
 impl MapSkiplist {
@@ -57,7 +68,15 @@ impl Skiplist for MapSkiplist {
         let mut skiplist = self.skiplist.lock().unwrap();
         skiplist.get_mut(&obj_id).unwrap().insert(idx);
     }
-    // streams the entries in order
+
+    // Method: Stream
+    // Arguments:
+    // * obj_ids: ids of objects we want to stream entries for
+    // * from: initial log index to start streaming
+    // * to: final log index for streaming, or None if we want to stream till the end
+    // Streams the entries concerning any object in object_ids
+    // Returns:
+    // * sorted vector of indices
     fn stream(&self,
               obj_ids: &HashSet<ObjId>,
               from: LogIndex,
@@ -79,6 +98,7 @@ impl Skiplist for MapSkiplist {
         return v;
     }
 
+    // GC entries in skiplist periodically (as snapshotting makes them redundant)
     fn gc(&mut self, idx: LogIndex) {
         let mut skiplist = self.skiplist.lock().unwrap();
         let mut new_skiplist = HashMap::new();
@@ -96,25 +116,35 @@ impl Skiplist for MapSkiplist {
 }
 
 pub trait Snapshotter {
+    // Register object obj_id with Snapshotter, to be kept track of
+    // Provide an empty object T, to construct a snapshotted object in
+    // and a callback that handles applying log entry operations to the object
     fn register_object<T: 'static + Encodable + Send>(&mut self,
                                                       obj_id: ObjId,
                                                       mut callback: Box<Callback>,
                                                       obj: T);
+    // Snapshot all objects, as of and including the idx
     fn snapshot(&mut self, idx: LogIndex);
+    // Get most recent snapshots for objects in obj_ids
     fn get_snapshots(&self, obj_ids: &HashSet<ObjId>) -> HashMap<ObjId, Snapshot>;
+    // Sends log operation and index to obj_id object to be applied
     fn exec(&mut self, obj_id: ObjId, idx: LogIndex, op: Operation);
+    // Starts main thread that listens for snapshotting requests
     fn start(&mut self);
 }
 
-// Per object threads and channels to send to each object
+// Class: AsyncSnapshotter
+// Creates and maintains most recent snapshots of all objected that registered with the Snapshotter
+// When a snapshotting request is received, all objects get new snapshots
+// Launches one thread per object, and a main thread that listens for snapshot requests
+// Creates one channel per object, to communicate snapshot requests and log ops to objects
 #[derive(Clone)]
 pub struct AsyncSnapshotter {
-    snapshots: Arc<Mutex<HashMap<ObjId, Snapshot>>>,
-    obj_chan: HashMap<ObjId, Sender<SnapshotOp>>,
-    done_chan: HashMap<ObjId, Receiver<SnapshotOp>>,
-    snapshots_tx: Sender<(WaitGroup, Snapshot)>,
-    snapshots_rx: Receiver<(WaitGroup, Snapshot)>,
-    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    snapshots: Arc<Mutex<HashMap<ObjId, Snapshot>>>, // per object most recent snapshot
+    obj_chan: HashMap<ObjId, Sender<SnapshotOp>>, // per object send channel
+    snapshots_tx: Sender<Option<(WaitGroup, Snapshot)>>, // for objects send their snapshot to main thread
+    snapshots_rx: Receiver<Option<(WaitGroup, Snapshot)>>, /* for main thread to receive and aggregate snapshots */
+    threads: Arc<Mutex<Vec<JoinHandle<()>>>>, // one thread per object and a main thread
 }
 
 impl AsyncSnapshotter {
@@ -123,7 +153,6 @@ impl AsyncSnapshotter {
         AsyncSnapshotter {
             snapshots: Arc::new(Mutex::new(HashMap::new())),
             obj_chan: HashMap::new(),
-            done_chan: HashMap::new(),
             snapshots_tx: snapshots_tx,
             snapshots_rx: snapshots_rx,
             threads: Arc::new(Mutex::new(Vec::new())),
@@ -136,26 +165,25 @@ impl Snapshotter for AsyncSnapshotter {
                                                       obj_id: ObjId,
                                                       mut callback: Box<Callback>,
                                                       obj: T) {
-        println!("registering object in snapshotter");
+        // Create channel for object
         let (obj_chan_tx, obj_chan_rx) = chan::async();
         self.obj_chan.insert(obj_id, obj_chan_tx);
         let snapshots_tx = self.snapshots_tx.clone();
         // Start snapshotting thread for this object
         self.threads.lock().unwrap().push(thread::spawn(move || {
             let obj = obj;
-            // entries for the object
+            // messages for the object
             while let Some(msg) = obj_chan_rx.recv() {
                 match msg {
                     SnapshotRequest(wg, idx) => {
                         let snap = json::encode(&obj).unwrap();
-                        // send the snapshot to the snapshot aggregator/sender
-                        snapshots_tx.send((wg, Snapshot::new(obj_id, idx, Encoded(snap))));
+                        // send the snapshot to the snapshot aggregator/sender (main thread)
+                        snapshots_tx.send(Some((wg, Snapshot::new(obj_id, idx, Encoded(snap)))));
                     }
                     LogOp(idx, op) => {
                         callback(idx, op);
                     }
                     Stop => {
-                        println!("Snapshotter: Stop Message Received");
                         return;
                     }
                 }
@@ -168,11 +196,12 @@ impl Snapshotter for AsyncSnapshotter {
         let n_objects = self.obj_chan.len();
         let snapshots = self.snapshots.clone();
 
+        // main Snapshotter thread
         self.threads.lock().unwrap().push(thread::spawn(move || {
             let mut idx_snapshots: HashMap<LogIndex, Vec<Snapshot>> = HashMap::new();
             // Listen to the channel of snapshots.
-            while let Some((wg, s)) = snapshots_rx.recv() {
-                // Aggregate a vector of snapshots on a per index basis.
+            while let Some(Some((wg, s))) = snapshots_rx.recv() {
+                // Aggregate a vector of snapshots on a per index basis
                 let idx = s.idx;
                 if !idx_snapshots.contains_key(&idx) {
                     idx_snapshots.insert(idx, Vec::new());
@@ -192,10 +221,10 @@ impl Snapshotter for AsyncSnapshotter {
                 }
                 wg.done();
             }
-            println!("Snapshotter: exiting start");
         }));
     }
 
+    // Exec: send LogOp to obj_id channel
     fn exec(&mut self, obj_id: ObjId, idx: LogIndex, op: Operation) {
         self.obj_chan[&obj_id].send(LogOp(idx, op));
     }
@@ -203,6 +232,7 @@ impl Snapshotter for AsyncSnapshotter {
     fn snapshot(&mut self, idx: LogIndex) {
         let wg = chan::WaitGroup::new();
         for chan in self.obj_chan.values() {
+            // get snapshot for each object
             wg.add(1);
             let wg = wg.clone();
             chan.send(SnapshotRequest(wg, idx));
@@ -225,38 +255,38 @@ impl Snapshotter for AsyncSnapshotter {
 
 impl Drop for AsyncSnapshotter {
     fn drop(&mut self) {
-        println!("dropping snapshotter");
         // Tell all per object threads threads to stop (register_object) -> snapshots_tx will close
         for chan in self.obj_chan.values() {
             chan.send(Stop);
         }
+        // close tx, to allow main snapshotting thread to return
+        self.snapshots_tx.send(None);
+        // wait for threads
         let mut threads = self.threads.lock().unwrap();
         for thread in threads.drain(..) {
             thread.join().unwrap();
         }
-        println!("snapshotter done");
     }
 }
 
-// Design: Two threads
-// One thread constantly polling the queue and using new entries to construct skip list.
-// One thread driving http server for clients to connect to and make rpc requests.
-// Responsibilities:
-//   Snapshotting: keep track of all objects and object ids
-//   Streaming: Keep track of skip list of entries for all objects
+// Class: VM
+// Responsible for snapshotting, streaming, and creating the skip list
+// Starts one thread that is constantly polling the queue and using new entries to construct skip list.
+// Starts the Snapshotter
+// Accepts and handles stream requests
 #[derive(Clone)]
 pub struct VM<Q: IndexedQueue + Send,
               Skip: Skiplist + Clone + Send,
               Snap: Snapshotter + Clone + Send>
 {
-    pub runtime: Arc<Mutex<Runtime<Q>>>,
-    obj_id: Vec<ObjId>,
-    local_queue: Arc<Mutex<HashMap<LogIndex, Entry>>>,
-    skiplist: Arc<Mutex<Skip>>,
-    snapshots: Arc<Mutex<Snap>>,
-    threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
-    stop: Arc<AtomicBool>,
-    queue: Q,
+    pub runtime: Arc<Mutex<Runtime<Q>>>, // VM runtime, same as Client VM, but works with encrypted data
+    obj_id: Vec<ObjId>, // ids of objects registered with VM
+    local_queue: Arc<Mutex<HashMap<LogIndex, Entry>>>, // cached SharedLog
+    skiplist: Arc<Mutex<Skip>>, // skiplist
+    snapshotter: Arc<Mutex<Snap>>, // snapshotter
+    threads: Arc<Mutex<Vec<JoinHandle<()>>>>, // threads spawned by VM
+    stop: Arc<AtomicBool>, // used to stop polling thread
+    queue: Q, // queue interface that allows communication with client
 }
 
 impl<Q, Skip, Snap> VM<Q, Skip, Snap>
@@ -271,7 +301,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             obj_id: Vec::new(),
             local_queue: Arc::new(Mutex::new(HashMap::new())),
             skiplist: Arc::new(Mutex::new(skiplist)),
-            snapshots: Arc::new(Mutex::new(snapshotter)),
+            snapshotter: Arc::new(Mutex::new(snapshotter)),
             threads: Arc::new(Mutex::new(Vec::new())),
             stop: Arc::new(AtomicBool::new(false)),
             queue: queue,
@@ -279,48 +309,43 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
         return vm;
     }
 
-    // start starts the vm streaming of the log: registers additions to local_queue as log_reader
-    // it has to be added to the local_queue before it is added to the skiplist though
     pub fn start(&mut self) {
-        // Start constructing skip list.
-        // Skip list stores all indices in the log for each entry.
+        // number of log entries seen
         let seen = Box::new(Arc::new(AtomicUsize::new(0)));
         {
-            let snapshotter = self.snapshots.clone();
+            let snapshotter = self.snapshotter.clone();
             let skiplist = self.skiplist.clone();
             let seen = seen.clone();
             let local_queue = self.local_queue.clone();
-            //let local_queue2 = self.local_queue.clone();
-            // The object callback adds it to the skiplist and the snapshot
 
-            // The local_queue should have the entry at the very beginning so it is always in there
-
-            // The number seen should be incremented at the end
-
-            // The snapshot should be done after adding it to the object
-            // The skiplist should be gc'd after everything is added
-
+            // Pre_hook to be called before the main object callbacks
+            // Makes sure entry exists in local_queue
             let pre_hook = Box::new(move |entry: Entry| {
+                // Ensure log entry exists in local queue
                 let idx = entry.idx.unwrap();
                 let mut local_queue = local_queue.lock().unwrap();
                 local_queue.insert(idx, entry);
             });
 
+            // Post_hook to be called after main object callbacks
+            // Sees if we have enough entries to require snapshot
             let post_hook = Box::new(move |entry: Entry| {
                 let idx = entry.idx.unwrap();
                 let seen = seen.fetch_add(1, SeqCst);
-                //let local_queue = local_queue2.lock().unwrap();
-                if (seen + 1) % 1000 == 0 {
+                if (seen + 1) % NENTRIES_PER_SNAP == 0 {
+                    // Time for a snapshot
                     snapshotter.lock().unwrap().snapshot(idx);
+                    // Remove now redundant entries from skiplist
                     skiplist.lock().unwrap().gc(idx - 50);
-                    // gc local queue
-                    /*let mut new_queue = HashMap::new();
-                    for (i, entry) in local_queue.drain() {
-                        if i >= idx {
-                            new_queue.insert(i, entry);
-                        }
-                    }
-                    *local_queue = new_queue;*/
+                    // Gc local queue if it grows too large (not yet needed)
+                    // let mut new_queue = HashMap::new();
+                    // for (i, entry) in local_queue.drain() {
+                    // if i >= idx {
+                    // new_queue.insert(i, entry);
+                    // }
+                    // }
+                    // local_queue = new_queue;
+
                 }
             });
 
@@ -328,46 +353,50 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             self.runtime.lock().unwrap().register_post_callback(post_hook);
         }
 
-        self.snapshots.lock().unwrap().start();
+        self.snapshotter.lock().unwrap().start();
         self.poll_runtime();
     }
 
+    // Poll runtime for updates every x milliseconds
     fn poll_runtime(&mut self) {
-        // sync all of the objects
         let runtime = self.runtime.clone();
         let stop = self.stop.clone();
         self.threads.lock().unwrap().push(thread::spawn(move || {
             loop {
                 if stop.load(Acquire) {
+                    // notice to stop
                     return;
                 }
+                // sync all of the objects
                 runtime.lock().unwrap().sync(None);
                 Duration::from_millis(1000);
             }
         }));
     }
 
-    // register_snapshottable takes in an object_id and a callback for
-    // constructing the object (just like runtime.register_callback).
-    // It also takes obj which is a reference to the object that is being created.
-    // It is encodable such that the vm can encode it (snapshot) to send to clients.
-    // Invarient: the callback is closed over obj
+    // Register object obj_id with VM, to be kept track of
+    // Provide an empty object Snapshottable, to construct a snapshotted object in
+    // and a callback that handles applying log entry operations to the object
     pub fn register_object<Snapshottable: 'static + Encodable + Send>(&mut self,
                                                                       obj_id: ObjId,
                                                                       callback: Box<Callback>,
                                                                       obj: Snapshottable) {
-        self.skiplist.lock().unwrap().insert(obj_id);
+        // insert/ register object
         self.obj_id.push(obj_id);
+        self.skiplist.lock().unwrap().insert(obj_id);
+        self.snapshotter.lock().unwrap().register_object(obj_id, callback, obj);
 
+        // cloned arc references callback is closed over
         let skiplist = self.skiplist.clone();
-        let snapshotter = self.snapshots.clone();
-        self.snapshots.lock().unwrap().register_object(obj_id, callback, obj);
+        let snapshotter = self.snapshotter.clone();
+        // VM version of object callback
         let cb = Box::new(move |idx, op: Operation| {
             // Add this index to the skiplist
             skiplist.lock().unwrap().append(obj_id, idx);
             // Execute this entry on the snapshotter for this object
             snapshotter.lock().unwrap().exec(obj_id, idx, op.clone());
         });
+        // Register object with VM's Runtime
         self.runtime.lock().unwrap().register_object(obj_id, cb);
     }
 }
@@ -387,8 +416,11 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
               to: Option<LogIndex>)
               -> mpsc::Receiver<LogData> {
         use indexed_queue::LogData::{LogEntry, LogSnapshot};
+        // channel to communicate with client
         let (tx, rx) = mpsc::channel();
-        let snaps = self.snapshots.lock().unwrap().get_snapshots(obj_ids);
+
+        // acquire and send most recent object snaps
+        let snaps = self.snapshotter.lock().unwrap().get_snapshots(obj_ids);
         let mut new_from = from;
         for (_, snapshot) in snaps {
             if from <= snapshot.idx && (to.is_none() || snapshot.idx < to.unwrap()) {
@@ -396,6 +428,8 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
                 tx.send(LogSnapshot(snapshot)).unwrap();
             }
         }
+
+        // send log entries appended after most recent snap
         from = new_from;
         let idxs = self.skiplist.lock().unwrap().stream(obj_ids, from, to);
         for idx in idxs {
@@ -413,22 +447,20 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
     }
 }
 
-
 impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
     where Q: IndexedQueue + Send,
           Skip: Skiplist + Clone + Send,
           Snap: Snapshotter + Clone + Send
 {
     fn drop(&mut self) {
-        // Tell thread poller to stop and collect threads
-        println!("stopping vm");
-        self.stop.store(true, Release);
-        let mut threads = self.threads.lock().unwrap();
-        for t in threads.drain(..) {
-            t.join().unwrap();
+        self.stop.store(true, Release); // stop polling thread
+        {
+            let mut threads = self.threads.lock().unwrap();
+            for t in threads.drain(..) {
+                t.join().unwrap();
+            }
+            self.runtime.lock().unwrap().stop();
         }
-        self.runtime.lock().unwrap().stop();
-        println!("vm shut down");
         // Snapshotter stops on drop snapshotter
     }
 }
