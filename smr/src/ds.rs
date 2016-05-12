@@ -240,7 +240,6 @@ impl<Q, I> Register<Q, I>
                     }
                 }
             }
-            // could get TX succeeded, mark the variable
             LogOp::Snapshot(State::Encoded(ref s)) => {
                 let enc_reg: Register<Q, Addable> = json::decode(&s).unwrap();
                 let mut data = self.data.lock().unwrap();

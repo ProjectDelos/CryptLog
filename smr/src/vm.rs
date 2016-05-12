@@ -1,6 +1,8 @@
 extern crate rustc_serialize;
 extern crate chan;
 
+const NENTRIES_PER_SNAP: usize = 100;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -112,8 +114,8 @@ pub struct AsyncSnapshotter {
     snapshots: Arc<Mutex<HashMap<ObjId, Snapshot>>>,
     obj_chan: HashMap<ObjId, Sender<SnapshotOp>>,
     done_chan: HashMap<ObjId, Receiver<SnapshotOp>>,
-    snapshots_tx: Sender<(WaitGroup, Snapshot)>,
-    snapshots_rx: Receiver<(WaitGroup, Snapshot)>,
+    snapshots_tx: Sender<Option<(WaitGroup, Snapshot)>>,
+    snapshots_rx: Receiver<Option<(WaitGroup, Snapshot)>>,
     threads: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
@@ -149,13 +151,13 @@ impl Snapshotter for AsyncSnapshotter {
                     SnapshotRequest(wg, idx) => {
                         let snap = json::encode(&obj).unwrap();
                         // send the snapshot to the snapshot aggregator/sender
-                        snapshots_tx.send((wg, Snapshot::new(obj_id, idx, Encoded(snap))));
+                        snapshots_tx.send(Some((wg, Snapshot::new(obj_id, idx, Encoded(snap)))));
                     }
                     LogOp(idx, op) => {
                         callback(idx, op);
                     }
                     Stop => {
-                        println!("Snapshotter: Stop Message Received");
+                        // println!("Snapshotter: Stop Message Received");
                         return;
                     }
                 }
@@ -171,7 +173,7 @@ impl Snapshotter for AsyncSnapshotter {
         self.threads.lock().unwrap().push(thread::spawn(move || {
             let mut idx_snapshots: HashMap<LogIndex, Vec<Snapshot>> = HashMap::new();
             // Listen to the channel of snapshots.
-            while let Some((wg, s)) = snapshots_rx.recv() {
+            while let Some(Some((wg, s))) = snapshots_rx.recv() {
                 // Aggregate a vector of snapshots on a per index basis.
                 let idx = s.idx;
                 if !idx_snapshots.contains_key(&idx) {
@@ -192,7 +194,7 @@ impl Snapshotter for AsyncSnapshotter {
                 }
                 wg.done();
             }
-            println!("Snapshotter: exiting start");
+            // println!("Snapshotter: exiting start");
         }));
     }
 
@@ -225,16 +227,19 @@ impl Snapshotter for AsyncSnapshotter {
 
 impl Drop for AsyncSnapshotter {
     fn drop(&mut self) {
-        println!("dropping snapshotter");
+        // println!("dropping snapshotter");
         // Tell all per object threads threads to stop (register_object) -> snapshots_tx will close
         for chan in self.obj_chan.values() {
             chan.send(Stop);
         }
+        // close tx
+        self.snapshots_tx.send(None);
+        // wait for threads
         let mut threads = self.threads.lock().unwrap();
         for thread in threads.drain(..) {
             thread.join().unwrap();
         }
-        println!("snapshotter done");
+        // println!("snapshotter done");
     }
 }
 
@@ -290,7 +295,7 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             let skiplist = self.skiplist.clone();
             let seen = seen.clone();
             let local_queue = self.local_queue.clone();
-            //let local_queue2 = self.local_queue.clone();
+            // let local_queue2 = self.local_queue.clone();
             // The object callback adds it to the skiplist and the snapshot
 
             // The local_queue should have the entry at the very beginning so it is always in there
@@ -309,18 +314,20 @@ impl<Q, Skip, Snap> VM<Q, Skip, Snap>
             let post_hook = Box::new(move |entry: Entry| {
                 let idx = entry.idx.unwrap();
                 let seen = seen.fetch_add(1, SeqCst);
-                //let local_queue = local_queue2.lock().unwrap();
-                if (seen + 1) % 1000 == 0 {
+                // let local_queue = local_queue2.lock().unwrap();
+                if (seen + 1) % NENTRIES_PER_SNAP == 0 {
                     snapshotter.lock().unwrap().snapshot(idx);
                     skiplist.lock().unwrap().gc(idx - 50);
-                    // gc local queue
-                    /*let mut new_queue = HashMap::new();
-                    for (i, entry) in local_queue.drain() {
-                        if i >= idx {
-                            new_queue.insert(i, entry);
-                        }
-                    }
-                    *local_queue = new_queue;*/
+                    // println!("START SNAP");
+                    // gc local queue if it grows too large (not yet needed)
+                    // let mut new_queue = HashMap::new();
+                    // for (i, entry) in local_queue.drain() {
+                    // if i >= idx {
+                    // new_queue.insert(i, entry);
+                    // }
+                    // }
+                    // local_queue = new_queue;
+
                 }
             });
 
@@ -414,6 +421,7 @@ impl<Q, Skip, Snap> IndexedQueue for VM<Q, Skip, Snap>
 }
 
 
+
 impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
     where Q: IndexedQueue + Send,
           Skip: Skiplist + Clone + Send,
@@ -421,14 +429,16 @@ impl<Q, Skip, Snap> Drop for VM<Q, Skip, Snap>
 {
     fn drop(&mut self) {
         // Tell thread poller to stop and collect threads
-        println!("stopping vm");
+        // println!("stopping vm");
         self.stop.store(true, Release);
-        let mut threads = self.threads.lock().unwrap();
-        for t in threads.drain(..) {
-            t.join().unwrap();
+        {
+            let mut threads = self.threads.lock().unwrap();
+            for t in threads.drain(..) {
+                t.join().unwrap();
+            }
+            self.runtime.lock().unwrap().stop();
         }
-        self.runtime.lock().unwrap().stop();
-        println!("vm shut down");
+        // println!("vm shut down");
         // Snapshotter stops on drop snapshotter
     }
 }

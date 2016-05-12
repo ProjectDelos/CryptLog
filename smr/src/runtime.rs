@@ -31,14 +31,14 @@ pub struct Runtime<Q> {
 
 impl<Q> Drop for Runtime<Q> {
     fn drop(&mut self) {
-        println!("DROPPING RUNTIME");
+        self.stop();
+        // println!("DROPPING RUNTIME");
     }
 }
 
-impl<Q> Runtime<Q> where Q: IndexedQueue + Send
-{
+impl<Q> Runtime<Q> {
     pub fn stop(&mut self) {
-        println!("Clearing Runtime");
+        // println!("Clearing Runtime");
 
         self.callbacks.clear();
         self.pre_callbacks.clear();
@@ -51,9 +51,12 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
         self.operations.clear();
 
         self.secure.take();
-        println!("Runtime Cleared");
+        // println!("Runtime Cleared");
     }
+}
 
+impl<Q> Runtime<Q> where Q: IndexedQueue + Send
+{
     pub fn new(iq: Q, me: Option<MetaEncryptor>) -> Runtime<Q> {
         return Runtime {
             iq: iq,
@@ -286,6 +289,7 @@ impl<Q> Runtime<Q> where Q: IndexedQueue + Send
                     }
                 }
                 Ok(LogSnapshot(s)) => {
+                    println!("got snap");
                     let snapshot = s.payload;
                     (*c)(s.idx, Operation::from_snapshot(obj_id, snapshot));
                 }
